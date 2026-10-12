@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en" data-theme="orange">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Promptathon · The AI Club</title>
+  <meta name="description" content="The AI Club Promptathon — The AI Challenge Arena. Three timed rounds.">
+  <meta name="theme-color" content="#e8682a">
+  <link rel="icon" href="/the-ai-club-logo.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400&family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=Lexend:wght@400;600&display=swap">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/opendyslexic@5/index.css">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+
+  <header class="top" id="top">
+    <a class="brand" href="#/" aria-label="Promptathon by The AI Club — home">
+      <img src="/the-ai-club-logo.png" alt="The AI Club" width="84" height="46">
+      <span class="brand-text"><b>Promptathon</b></span>
+    </a>
+    <nav class="top-nav" id="nav" aria-label="Main"></nav>
+    <div class="top-tools">
+      <button class="btn ghost sm" data-act="rules" aria-haspopup="dialog">How to play</button>
+      <button class="btn ghost sm" data-act="settings" aria-haspopup="dialog" aria-label="Reading and display settings"><span aria-hidden="true">Aa</span><span class="hide-sm"> Reading</span></button>
+      <div id="account"></div>
+    </div>
+  </header>
+
+  <main id="main" tabindex="-1"></main>
+
+  <footer class="foot">
+    <img src="/the-ai-club-logo.png" alt="The AI Club" width="40" height="22">
+    <span>Promptathon is a product of The AI Club · The AI Challenge Arena</span>
+  </footer>
+
+  <div id="ruler" class="ruler" hidden></div>
+  <div id="sr-live" class="sr-only" aria-live="polite"></div>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+  <dialog id="dlg" aria-labelledby="dlg-title">
+    <form method="dialog" class="dlg">
+      <header class="dlg-head">
+        <h2 id="dlg-title"></h2>
+        <button class="icon-btn" value="cancel" aria-label="Close">✕</button>
+      </header>
+      <div class="dlg-body" id="dlg-body"></div>
+      <footer class="dlg-foot" id="dlg-foot"></footer>
+    </form>
+  </dialog>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

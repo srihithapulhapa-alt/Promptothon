@@ -1,0 +1,24 @@
+{
+  "name": "promptathon",
+  "version": "1.0.0",
+  "description": "The AI Club Promptathon — The AI Challenge Arena",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env src/server.js",
+    "dev": "node --watch --env-file-if-exists=.env src/server.js",
+    "connect-google": "node --env-file=.env src/connect-google.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.131.0",
+    "express": "^5.2.1",
+    "fflate": "^0.8.3",
+    "nodemailer": "^10.1.0",
+    "puppeteer": "^25.13.0",
+    "sharp": "^0.35.5",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
+  }
+}

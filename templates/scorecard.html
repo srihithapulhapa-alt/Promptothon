@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{student_name}} · Score card</title>
+<!--
+  Default score card. Replace this file with your own design (HTML + CSS) and keep the {{placeholders}}.
+  Single values: {{student_name}} {{grade}} {{player_code}} {{school}} {{band}} {{event}} {{status}} {{total}}
+                 {{round1}} {{round2}} {{round3}} {{strength}} {{next_step}} {{date}} {{logo_url}}
+  Repeat one row per skill:  {{#skills}} … {{/skills}}  using {{id}} {{name}} {{about}} {{percent}} {{bar}} {{evidence}}
+  ({{bar}} is 0–100, handy for a bar's width).
+-->
+<style>
+  :root { --ink: #1d1a17; --muted: #5d554e; --line: #eee1d5; --accent: #e8682a; --soft: #fff6ee; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #f4efe9; color: var(--ink); font: 16px/1.45 system-ui, -apple-system, 'Segoe UI', sans-serif; }
+  .card { width: 210mm; min-height: 297mm; margin: 16px auto; background: #fff; padding: 14mm; border: 1px solid var(--line); }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 3px solid var(--accent); padding-bottom: 10px; }
+  header img { height: 54px; }
+  h1 { margin: 0; font-size: 26px; }
+  .sub { color: var(--muted); margin: 4px 0 0; }
+  .status { font-size: 12px; font-weight: 700; background: var(--soft); border: 1px solid var(--accent); border-radius: 99px; padding: 3px 10px; white-space: nowrap; }
+  .who { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 16px 0; }
+  .who div, .tiles div { border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; }
+  .who small, .tiles small { display: block; color: var(--muted); font-size: 12px; }
+  .who b { font-size: 16px; }
+  .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 16px; }
+  .tiles b { font-size: 28px; } .tiles span { color: var(--muted); font-size: 14px; }
+  .tiles .total { background: var(--soft); border-color: var(--accent); }
+  h2 { font-size: 18px; margin: 0 0 8px; }
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; font-size: 12px; text-transform: uppercase; color: var(--muted); padding: 6px 8px; border-bottom: 2px solid var(--line); }
+  td { padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  td small { color: var(--muted); display: block; font-size: 12px; }
+  .pct { width: 56px; font-weight: 700; text-align: right; }
+  .bar { width: 38%; } .bar i { display: block; height: 10px; border-radius: 5px; background: var(--accent); }
+  .bar { background: linear-gradient(var(--line), var(--line)) center / 100% 10px no-repeat; }
+  .notes { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 16px; }
+  .notes div { border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; background: var(--soft); }
+  .notes b { display: block; margin-bottom: 4px; color: var(--accent); }
+  footer { margin-top: 14px; font-size: 12px; color: var(--muted); display: flex; justify-content: space-between; gap: 12px; }
+  @media print {
+    body { background: #fff; }
+    .card { margin: 0; border: 0; width: 210mm; height: 296mm; min-height: 0; padding: 10mm 12mm; overflow: hidden; }
+    td { padding: 5px 8px; } .who, .tiles { margin: 10px 0; } h1 { font-size: 24px; }
+    @page { size: A4; margin: 0; }
+  }
+</style>
+</head>
+<body>
+<main class="card">
+  <header>
+    <div><h1>My AI Readiness &amp; Thinking Skills</h1><p class="sub">A snapshot of how I communicate, reason, solve problems and make responsible decisions with AI.</p></div>
+    <div style="text-align:right"><img src="{{logo_url}}" alt="The AI Club"><div class="status">{{status}}</div></div>
+  </header>
+
+  <section class="who">
+    <div><small>Student name</small><b>{{student_name}}</b></div>
+    <div><small>Grade</small><b>{{grade}}</b></div>
+    <div><small>Player code</small><b>{{player_code}}</b></div>
+    <div><small>School</small><b>{{school}}</b></div>
+  </section>
+
+  <section class="tiles">
+    <div class="total"><small>Total</small><b>{{total}}</b><span>/60</span></div>
+    <div><small>AI Blitz</small><b>{{round1}}</b><span>/20</span></div>
+    <div><small>Crack the AI Case</small><b>{{round2}}</b><span>/20</span></div>
+    <div><small>Creator Showdown</small><b>{{round3}}</b><span>/20</span></div>
+  </section>
+
+  <h2>Skills demonstrated in this challenge</h2>
+  <table>
+    <thead><tr><th>Skill &amp; what it means</th><th class="pct">%</th><th>Skill score</th></tr></thead>
+    <tbody>
+    {{#skills}}<tr><td><b>{{name}}</b><small>{{about}}</small></td><td class="pct">{{percent}}</td><td class="bar"><i style="width:{{bar}}%"></i></td></tr>
+    {{/skills}}
+    </tbody>
+  </table>
+
+  <section class="notes">
+    <div><b>My strength</b>{{strength}}</div>
+    <div><b>My next step</b>{{next_step}}</div>
+  </section>
+
+  <footer>
+    <span>Skill scores describe this challenge only and do not add up to the total score.</span>
+    <span>{{event}} · {{date}}</span>
+  </footer>
+</main>
+</body>
+</html>
