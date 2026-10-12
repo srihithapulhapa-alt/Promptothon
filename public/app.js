@@ -815,6 +815,11 @@ function targetHTML(lines) {
   return out;
 }
 
+const CONNECTION_HINTS = [
+  { hint: 'Audience or purpose: who is the target for, and how did your prompt show that?', eg: 'I said “for Grade 6 students” because the target speaks to young readers.' },
+  { hint: 'Content: pick one thing in the target and point to the words in your prompt that ask for it.', eg: 'The target lists three tips, so I wrote “give three short tips”.' },
+  { hint: 'Layout or tone: how did your prompt ask for the same look, order or voice?', eg: 'I asked for a heading and bullet points to match the target’s layout.' }];
+
 function r3View() {
   const c = p.content, v = c.view, d = p.draft, ll = c.lifelines.data;
   const gens = c.generations || [], image = v.image;
@@ -830,7 +835,7 @@ function r3View() {
     <div class="stack">
       <section class="card stack">
         <div class="field"><label for="r3-prompt">Your prompt</label><span class="hint">Say what to make, who it is for, what it must include and how it should be laid out.</span>
-          <textarea id="r3-prompt" data-field="prompt" rows="6" maxlength="3000">${esc(d.prompt || '')}</textarea></div>
+          <textarea id="r3-prompt" data-field="prompt" data-nopaste rows="6" maxlength="3000" placeholder="For example: Write a short, friendly notice for Grade 6 students about…">${esc(d.prompt || '')}</textarea></div>
         ${image ? '<p class="note small">This target is a picture, so there is no AI tool here. Describe what you see in your prompt, then explain three choices below.</p>' : cfg.aiTool ? `<div class="row between"><span class="muted small">${c.generationsLeft} of ${cfg.generations} AI tries left</span>
           <button class="btn ghost" data-act="generate" ${c.generationsLeft <= 0 ? 'disabled' : ''}>Try my prompt with AI</button></div>`
           : '<p class="note small">The AI tool isn’t switched on for this event — write your best prompt and your three connections.</p>'}
@@ -839,11 +844,22 @@ function r3View() {
         ${gens.length ? '<p class="small muted" style="margin:0">Your final creation is one of the AI results above. It can’t be typed, pasted or edited.</p>' : ''}
       </section>
       <section class="card stack"><h3>Explain your choices</h3><p class="muted small" style="margin:0">Three short connections: which part of your prompt matches which part of the target?</p>
-        ${[1, 2, 3].map((i) => `<div class="field"><label for="r3-c${i}">Connection ${i}</label><input id="r3-c${i}" type="text" data-field="c${i}" maxlength="400" value="${esc(d[`c${i}`] || '')}"></div>`).join('')}
+        ${CONNECTION_HINTS.map((h, n) => `<div class="field"><label for="r3-c${n + 1}">Connection ${n + 1}</label><span class="hint" id="r3-h${n + 1}">${h.hint}</span><input id="r3-c${n + 1}" type="text" data-field="c${n + 1}" data-nopaste maxlength="400" aria-describedby="r3-h${n + 1}" placeholder="${h.eg}" value="${esc(d[`c${n + 1}`] || '')}"></div>`).join('')}
+        <p class="small muted" style="margin:0">Typing only — copy and paste are switched off for Round 3.</p>
       </section>
       <div class="actionbar"><span class="muted small">Your answers save every second.</span><button class="btn" data-act="submit">Review & submit</button></div>
     </div></div>`;
 }
+
+// Round 3 answers must be typed by hand: no pasting, dropping, cutting or copying in those boxes.
+for (const t of ['paste', 'drop', 'copy', 'cut']) document.addEventListener(t, (e) => {
+  if (!e.target.closest?.('[data-nopaste]')) return;
+  e.preventDefault();
+  if (t === 'paste' || t === 'drop') toast('Pasting is switched off in Round 3 — please type your answer.');
+});
+document.addEventListener('keydown', (e) => { // Shift+Insert also pastes on some systems
+  if (e.shiftKey && e.key === 'Insert' && e.target.closest?.('[data-nopaste]')) e.preventDefault();
+});
 
 // draft editing
 document.addEventListener('input', (e) => onField(e.target));
