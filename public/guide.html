@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en" data-theme="orange">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Foldling’s Guide · Promptathon</title>
+  <meta name="theme-color" content="#e8682a">
+  <link rel="icon" href="/the-ai-club-logo.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400&family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&display=swap">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="top">
+    <a class="brand" href="/#/" aria-label="Promptathon by The AI Club — home">
+      <img src="/the-ai-club-logo.png" alt="The AI Club" width="84" height="46">
+      <span class="brand-text"><b>Promptathon</b></span>
+    </a>
+    <div class="top-tools"><a class="btn ghost sm" href="/#/play">Skip to lobby →</a></div>
+  </header>
+  <main id="main" tabindex="-1">
+    <div class="wrap book">
+      <h1 style="margin-bottom:0">Foldling’s Guide to Promptothon</h1>
+      <p class="muted">Turn the pages with the buttons, the arrow keys, or a swipe.</p>
+      <div class="book-page" id="page" aria-live="polite"></div>
+      <div class="book-nav">
+        <button class="btn ghost" id="prev">← Previous</button>
+        <span class="chip" id="count">1 of 8</span>
+        <button class="btn ghost" id="next">Next →</button>
+        <button class="btn quiet" id="full">⛶ Fullscreen</button>
+        <a class="btn" href="/#/play">Go to lobby →</a>
+      </div>
+    </div>
+  </main>
+  <footer class="foot"><img src="/the-ai-club-logo.png" alt="The AI Club" width="40" height="22"><span>Promptathon is a product of The AI Club · The AI Challenge Arena</span></footer>
+  <script>
+    const total = 8, page = document.getElementById('page'), count = document.getElementById('count');
+    const prev = document.getElementById('prev'), next = document.getElementById('next');
+    let at = 1;
+    function show(n, back) {
+      at = Math.min(total, Math.max(1, n));
+      const img = new Image();
+      img.src = `/guide/${at}.jpg`;
+      img.alt = `Guide page ${at} of ${total}`;
+      img.className = 'in' + (back ? ' back' : '');
+      page.replaceChildren(img);
+      count.textContent = `${at} of ${total}`;
+      prev.disabled = at === 1; next.disabled = at === total;
+      const ahead = new Image(); ahead.src = `/guide/${Math.min(total, at + 1)}.jpg`;
+    }
+    prev.onclick = () => show(at - 1, true);
+    next.onclick = () => show(at + 1);
+    document.addEventListener('keydown', (e) => { if (e.key === 'ArrowRight') show(at + 1); if (e.key === 'ArrowLeft') show(at - 1, true); });
+    let x0 = null;
+    page.addEventListener('touchstart', (e) => { x0 = e.changedTouches[0].clientX; }, { passive: true });
+    page.addEventListener('touchend', (e) => { if (x0 === null) return; const dx = e.changedTouches[0].clientX - x0; x0 = null; if (Math.abs(dx) > 50) show(at + (dx < 0 ? 1 : -1), dx > 0); }, { passive: true });
+    document.getElementById('full').onclick = () => (document.fullscreenElement ? document.exitFullscreen() : page.requestFullscreen()).catch(() => {});
+    show(1);
+  </script>
+</body>
+</html>

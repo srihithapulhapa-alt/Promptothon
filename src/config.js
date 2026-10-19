@@ -9,6 +9,7 @@ export const env = {
   dataDir: e.DATA_DIR || './data',
   googleClientId: e.GOOGLE_CLIENT_ID || '',
   googleClientSecret: e.GOOGLE_CLIENT_SECRET || '',
+  contactEmail: (e.CONTACT_EMAIL || e.DEFAULT_ADMIN_EMAIL || 'srihitha.pulhapa@expinfi.com').toLowerCase(), // shown on the privacy page as the grievance contact
   defaultAdmin: (e.DEFAULT_ADMIN_EMAIL || 'srihitha.pulhapa@expinfi.com').toLowerCase(),
   bankFileId: e.QUESTION_BANK_FILE_ID || '1jYPiILnJbk0yqG_h9AM6PiD6D4kJL1Pr',
   rulesFileId: e.GAME_RULES_FILE_ID || '1knJMFlyXsXr_MjWFHIplUBqv2111wk8K',
@@ -38,6 +39,7 @@ export const EVENT_NAME = 'Promptathon';       // one fixed event; there is no w
 export const BANK_REFRESH_MS = 5 * 60 * 1000; // re-read the Drive bank/flow so the latest version is always used
 export const DATA_SHEET_TITLE = 'The AI Club Promptathon — Results';
 export const SESSION_DAYS = 7;
+export const POLICY_VERSION = '2026-10'; // bump when the privacy policy or terms change materially
 
 // Google scopes: students only need identity; the backend alone uses Drive + Sheets (see `npm run connect-google`).
 export const SCOPES_LOGIN = ['openid', 'email', 'profile'];
@@ -58,6 +60,8 @@ export const bandOf = (grade) => BANDS.find((b) => grade >= b.min && grade <= b.
 export const ROUND_SECONDS = 480;
 export const ROUND_MINUTES_RANGE = { min: 1, max: 30, default: ROUND_SECONDS / 60 }; // admins may change a round's length
 export const SAVE_GRACE_MS = 1500;      // an autosave already in flight at the deadline is still accepted
+export const LOBBY_SEEN_MS = 20000;     // a waiting student counts as "in the lobby" only if their lobby screen checked in this recently
+export const MAX_PHONES = 5;            // optional phone numbers per student
 // The Google Sheet is the data store. The server keeps a working copy in memory and writes only the rows that changed.
 export const STORE_FLUSH_MS = 2500;      // changed rows reach the sheet within this long (autosave still lands in memory every second)
 export const STORE_URGENT_MS = 400;      // …and almost at once after a start, submit, new student or decision
@@ -92,18 +96,32 @@ export const DEFAULT_FLOW = [
 export const LIFELINES_PER_ROUND = 2;
 
 export const ROUNDS = {
-  1: { name: 'AI Blitz', tagline: 'Eight quick challenges. One final boss. Think fast!', icon: '⚡', max: 20,
+  1: { name: 'AI Blitz', tagline: 'Quick choices. Smart thinking!', icon: '⚡', max: 20, blurb: 'Choose the best answers.',
+    intro: ['Choose the best answer to eight questions. Then take on the Final Boss!'],
+    says: '“A confident AI answer can still be wrong. Think before you choose!”',
+    lifelineNote: 'Each lifeline can be used once across the whole round, including the Final Boss.',
+    points: 'Eight questions × 2 points, plus Final Boss × 4 points = 20 points',
     lifelines: [
-      { id: 'fifty', name: '50–50', desc: 'Removes two incorrect choices from the question you are on.' },
-      { id: 'clue', name: 'Clue Flash', desc: 'Shows one prepared clue for the question you are on.' }] },
-  2: { name: 'Crack the AI Case', tagline: 'The AI has left four puzzles behind. Can you solve the case?', icon: '🧩', max: 20,
+      { id: 'fifty', name: '50–50', desc: 'Removes two wrong choices from one question.' },
+      { id: 'clue', name: 'Clue Flash', desc: 'Gives you a hint.' }] },
+  2: { name: 'Crack the AI Case', tagline: 'Something doesn’t add up. Can you spot it?', icon: '🧩', max: 20, blurb: 'Solve four puzzles.',
+    intro: ['You will receive an AI answer and evidence cards. The evidence cards contain information to help you check the answer.',
+      'Using the AI answer and evidence cards, solve four puzzles.'],
+    says: '“Follow the evidence. Keep what is right and fix what is wrong!”',
+    lifelineNote: 'Each can be used once.',
+    points: 'Four puzzles × 5 points = 20 points',
     lifelines: [
-      { id: 'compass', name: 'Case Compass', desc: 'Shows which paragraph contains the main trap.' },
-      { id: 'unlock', name: 'Unlock a Clue', desc: 'Gives a prepared hint for the puzzle you choose.' }] },
-  3: { name: 'Creator Showdown', tagline: 'Your mission. Your choices. Your final creation.', icon: '🎨', max: 20,
+      { id: 'compass', name: 'Case Compass', desc: 'Points you towards the part to check.' },
+      { id: 'unlock', name: 'Unlock a Clue', desc: 'Gives you a hint for one puzzle.' }] },
+  3: { name: 'Match the Output', tagline: 'See the result. Write the instructions!', icon: '🎨', max: 20, blurb: 'Write a prompt for the text or image you see.',
+    intro: ['You will see a text output or an image, such as a story, poster or comic.',
+      'Your challenge is to write a prompt that could help AI create something like it. You do not need to generate an AI output.'],
+    says: '“There can be more than one good prompt. Make yours clear and explain your choices!”',
+    lifelineNote: 'Each can be used once.',
+    points: '20 points',
     lifelines: [
-      { id: 'goal', name: 'Goal Lens', desc: 'A hint about the purpose and the reader of the target.' },
-      { id: 'structure', name: 'Structure Scan', desc: 'A hint about the layout of the target.' }] },
+      { id: 'goal', name: 'Goal Lens', desc: 'Helps you think about the purpose and audience.' },
+      { id: 'structure', name: 'Structure Scan', desc: 'Helps you notice the layout.' }] },
 };
 
 // Score components (from the Scoring sheet). `auto` parts are key-matched; the rest use the rubric.
@@ -123,11 +141,10 @@ export const SCORE_PARTS = {
     { key: 'repairWhy', label: 'Repair — why it works', max: 2 },
   ],
   3: [
-    { key: 'purpose', label: 'Purpose and audience', max: 4 },
-    { key: 'content', label: 'Target content', max: 4 },
-    { key: 'format', label: 'Format and structure', max: 4 },
-    { key: 'clarity', label: 'Clarity and constraints', max: 4 },
-    { key: 'rationale', label: 'Rationale', max: 4 },
+    { key: 'purpose', label: 'Purpose and audience', max: 5 },
+    { key: 'content', label: 'Target content', max: 5 },
+    { key: 'format', label: 'Format and structure', max: 5 },
+    { key: 'clarity', label: 'Clarity and constraints', max: 5 },
   ],
 };
 
@@ -181,34 +198,39 @@ export const AWARDS = [
 
 // Published rules (criteria only — never answers).
 export const RULES = {
+  start: [
+    'Enter your unique player code.',
+    'Check your name, grade and school.',
+    'Read the rules below.',
+    'When the event opens, click Start Challenge.',
+  ],
+  // "Play fair" — shown on the welcome screen and in How to play
   general: [
-    'You play on your own. There are {rounds}, worth 60 points in total.',
-    'Your answers save automatically every second. Look for the “Saved” note next to the timer.',
-    'When the timer reaches zero, your saved answers are submitted. Changes after that are not accepted.',
-    'Submitting early locks that round. The next round still starts at its scheduled time.',
-    'Each round has two lifelines, and each lifeline can be used once in that round. Lifelines never cost points and never add time.',
-    'Your host may add time to a round or end it early. The timer on your screen is always the right one.',
-    'Scores you see are provisional until the host checks them. Ties are split by Round 2, then Round 3 content.',
-    'Never type personal details such as your address, phone number or passwords.',
+    'Use your own ideas. Do not copy or get answers from others.',
+    'You do not need to open an AI tool. If a new tab is opened, the game is paused.',
+    'Each round has two lifelines. Each can be used once, with no points lost.',
+    'Check your work before submitting. You cannot change it after submission.',
+    'When time runs out, your saved answers will be submitted.',
   ],
   1: [
-    'Eight quick challenges, then one final boss question. No AI tool in this round — you decide.',
-    'Each quick challenge: 2 points for the correct choice.',
-    'Final boss: 2 points for the best choice + 2 points for a one-sentence explanation of why.',
-    'Lifelines: 50–50 removes two wrong choices. Clue Flash shows a hint. Neither gives the answer.',
+    'Read each question and its four choices.',
+    'Choose one answer.',
+    'For the Final Boss, also explain your choice in one sentence.',
+    'Check your answers and submit before time runs out.',
   ],
   2: [
-    'You get a Case File: an AI answer, a mixed-up prompt and evidence cards. Solve four puzzles (5 points each).',
-    'Rebuild the Prompt: put the four blocks into Goal → Audience → Must include → Format. 1 point per slot, +1 if all four are right.',
-    'Spot the Trap: pick the paragraph with the false or misleading claim (2) and explain the problem (3).',
-    'Match the Evidence: pick the card that supports a correction (2) and explain how it helps (3).',
-    'Repair the Campaign: rewrite the faulty claim correctly (3) and explain why your fix works (2).',
-    'One timer of {r} for the whole case — divide your time as you like.',
+    'Rebuild the Prompt: Put the prompt blocks in the order shown.',
+    'Spot the Problem: Find a statement that is wrong or not backed by the evidence. Explain why.',
+    'Find the Evidence: Choose the card that shows the problem. Explain how it helps.',
+    'Fix the Answer: Rewrite the statement so it matches the evidence. Explain your change.',
+    'Use the cards from your case. Keep your explanations short and clear.',
   ],
   3: [
-    'You see a target that an AI made — a text or a picture. Write a prompt that could make something similar.',
-    `For a text target you may test your prompt with the AI tool up to ${R3_GENERATIONS} times and choose one result. You can’t edit it. For a picture, write your prompt only.`,
-    'Then write three short connections: how parts of your prompt match the target.',
-    'Scored on purpose & audience, content, format & structure, clarity, and your rationale (4 points each). Many different prompts can score full marks.',
+    'Look carefully at the target.',
+    'Write a prompt that describes what AI should create.',
+    'Include who it is for, the important details and how it should look or be arranged.',
+    'Explain three choices in your prompt and how they match the target.',
+    'Check your work and submit.',
+    'For an image, think about the people or objects, colours, style and where things are placed. For text, think about the message, headings and sections.',
   ],
 };

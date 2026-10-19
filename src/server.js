@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
 import express from 'express';
-import { env, APP_NAME, BANDS, GRADES, ROUNDS, RULES, R3_MODES, SCORE_PARTS, LIFELINES_PER_ROUND, R3_GENERATIONS, SESSION_DAYS, BANK_REFRESH_MS, bandOf } from './config.js';
+import { env, APP_NAME, BANDS, GRADES, ROUNDS, RULES, R3_MODES, SCORE_PARTS, LIFELINES_PER_ROUND, R3_GENERATIONS, SESSION_DAYS, BANK_REFRESH_MS, POLICY_VERSION, bandOf } from './config.js';
 import { db, save, uid, initStore, setReports, setCards } from './store.js';
 import { authUrl, exchangeCode } from './google.js';
 import { loadBank, loadFlow, bankInfo, bandProblems, getFlow, imageFor } from './bank.js';
@@ -50,11 +50,11 @@ app.get('/auth/google', (req, res) => {
   res.redirect(authUrl(state));
 });
 
-app.get('/auth/callback', async (req, res) => {
+const finishSignIn = (exchange) => async (req, res) => {
   const expected = readCookie(req, 'pt_state');
   if (!req.query.code || !expected || req.query.state !== expected) return res.redirect('/?error=signin');
   try {
-    const who = await exchangeCode(req.query.code);
+    const who = await exchange(req.query.code);
     res.setHeader('Set-Cookie', cookie('pt_state', '', 0));
     issue(res, { email: who.email, name: who.name, picture: who.picture, studentId: null, exp: Date.now() + SESSION_DAYS * 864e5 });
     res.redirect('/#/');
@@ -62,7 +62,8 @@ app.get('/auth/callback', async (req, res) => {
     console.error('Sign-in failed:', err.message);
     res.redirect('/?error=signin');
   }
-});
+};
+app.get('/auth/callback', finishSignIn(exchangeCode));
 
 app.post('/auth/logout', (req, res) => {
   res.setHeader('Set-Cookie', cookie('pt', '', 0));
@@ -73,8 +74,11 @@ app.post('/auth/logout', (req, res) => {
 app.get('/api/config', (req, res) => {
   res.json({ app: APP_NAME, bands: BANDS.map(({ id, label }) => ({ id, label })), grades: GRADES, rounds: ROUNDS, rules: RULES,
     roundMinutes: game.roundMinutes(), scoreParts: SCORE_PARTS, lifelinesPerRound: LIFELINES_PER_ROUND, generations: R3_GENERATIONS, aiTool: aiEnabled(),
-    flow: getFlow().map(({ key, type, round, sec, title }) => ({ key, type, round, sec, title })), googleReady: Boolean(env.googleClientId) });
+    flow: getFlow().map(({ key, type, round, sec, title }) => ({ key, type, round, sec, title })), googleReady: Boolean(env.googleClientId), contact: env.contactEmail, policyVersion: POLICY_VERSION });
 });
+
+// Anyone (a parent, a student, a teacher) may ask for a child's data to be erased; no sign-in needed.
+app.post('/api/deletion', (req, res) => res.json(game.requestDeletion(session(req)?.email, req.body)));
 
 app.get('/api/me', (req, res) => {
   const s = session(req);
@@ -86,7 +90,7 @@ app.get('/api/me', (req, res) => {
     out.studentId = s.studentId;
     out.students = game.studentsOf(s.email).map((st) => {
       const a = game.currentAttempt(st.id);
-      return { id: st.id, code: st.code, name: st.name, grade: st.grade, band: bandOf(st.grade), school: db.schools.find((x) => x.id === st.schoolId)?.name, status: a?.status || 'new' };
+      return { id: st.id, code: st.code, name: st.name, grade: st.grade, band: bandOf(st.grade), school: db.schools.find((x) => x.id === st.schoolId)?.name, status: a ? game.statusOf(a) : 'new', redoRound: a?.status === 'waiting' ? a.redo?.round || null : null };
     });
     out.schools = db.schools.map(({ id, name }) => ({ id, name }));
   }
@@ -95,6 +99,8 @@ app.get('/api/me', (req, res) => {
 
 // ---------- student ----------
 const S = need('student');
+app.post('/api/play/leave', S, (req, res) => res.json(game.leaveWindow(req.s, req.body.deviceId)));
+app.post('/api/play/lock-request', S, (req, res) => res.json(game.lockRequest(req.s, req.body.note)));
 app.post('/api/students', S, (req, res) => res.json(game.createStudent(req.s.email, req.body)));
 app.post('/api/students/select', S, (req, res) => { game.selectStudent(req.s, req.body.studentId); issue(res, req.s); res.json(game.playState(req.s)); });
 app.post('/api/students/release', S, (req, res) => { game.releaseStudent(req.s); issue(res, req.s); res.json({ ok: true }); });
@@ -140,7 +146,7 @@ app.get('/api/admin/overview', A, (req, res) => {
     const a = game.currentAttempt(s.id, ev.id);
     const ph = a ? game.phaseOf(a) : null;
     return { id: s.id, code: s.code, name: s.name, email: s.email, grade: s.grade, band: bandOf(s.grade), schoolId: s.schoolId,
-      attemptId: a?.id, status: a?.status || 'not joined', phase: ph && { type: ph.type, round: ph.round, title: ph.title, remainingMs: ph.remainingMs },
+      attemptId: a?.id, lock: a?.acks?._lock || null, status: a ? game.statusOf(a) : 'not joined', redoRound: a?.status === 'waiting' ? a.redo?.round || null : null, phase: ph && { type: ph.type, round: ph.round, title: ph.title, remainingMs: ph.remainingMs },
       scores: a && [1, 2, 3].map((r) => {
         const rec = a.rounds[r];
         return rec?.score ? { total: Object.values(rec.score.parts).reduce((t, p) => t + (p.points || 0), 0), pending: rec.score.pending } : null;
@@ -148,7 +154,7 @@ app.get('/api/admin/overview', A, (req, res) => {
       reattempts: db.attempts.filter((x) => x.studentId === s.id && x.eventId === ev.id && x.archived).length };
   });
   res.json({ event: ev, schools: db.schools, admins: [{ email: env.defaultAdmin, fixed: true }, ...db.admins], students,
-    runs: game.runs(), emailReady: emailReady(), pendingRequests: game.pendingRequests(), roundMinutes: game.roundMinutes(), phaseSeconds: game.phaseSeconds(), lbAllSchools: Boolean(db.settings.lbAllSchools),
+    runs: game.runs(), emailReady: emailReady(), pendingRequests: game.pendingRequests(), pendingLocks: game.pendingLocks(), pendingDeletions: db.deletions.filter((d) => d.status === 'open').length, roundMinutes: game.roundMinutes(), phaseSeconds: game.phaseSeconds(), lbAllSchools: Boolean(db.settings.lbAllSchools),
     bank: bankInfo()?.counts, bandProblems: Object.fromEntries(BANDS.map((b) => [b.id, bandProblems(b.id, game.r3Mode())])),
     r3Mode: game.r3Mode(), r3Modes: R3_MODES });
 
@@ -217,22 +223,33 @@ app.get('/api/admin/image/:id', A, (req, res) => {
   res.type(img.type).set('Cache-Control', 'private, max-age=3600').send(img.buf);
 });
 app.post('/api/admin/r3-mode', A, (req, res) => { game.setR3Mode(req.body.mode); res.json({ mode: game.r3Mode() }); });
+app.get('/api/admin/deletions', A, (req, res) => res.json(game.listDeletions()));
+app.post('/api/admin/deletions/:id', A, (req, res) => { game.closeDeletion(req.params.id, req.s.email); res.json({ ok: true }); });
 app.get('/api/admin/requests', A, (req, res) => res.json(game.listRequests()));
-app.post('/api/admin/requests/:id', A, (req, res) => { game.decideRequest(req.params.id, Boolean(req.body.approve), req.body.reply, req.s.email); res.json({ ok: true }); });
+app.post('/api/admin/requests/:id', A, (req, res) => { game.decideRequest(req.params.id, Boolean(req.body.approve), req.body.reply, req.s.email, Number(req.body.round) || 0); res.json({ ok: true }); });
 app.post('/api/admin/phase-time', A, (req, res) => {
   const ids = Array.isArray(req.body.studentIds) ? req.body.studentIds : db.students.map((s) => s.id);
   res.json(game.phaseTime(req.body.action, ids, req.body));
 });
 app.post('/api/admin/timing', A, (req, res) => { game.setTiming(req.body); res.json({ roundMinutes: game.roundMinutes(), phaseSeconds: game.phaseSeconds() }); });
 app.post('/api/admin/leaderboard-scope', A, (req, res) => { db.settings.lbAllSchools = Boolean(req.body.all); save(true); res.json({ all: db.settings.lbAllSchools }); });
-app.post('/api/admin/reattempt', A, (req, res) => { game.enableReattempt(req.body.studentId); res.json({ ok: true }); });
+app.post('/api/admin/reattempts', A, (req, res) => res.json(game.enableReattempts(Array.isArray(req.body.studentIds) ? req.body.studentIds : [], Number(req.body.round) || 0)));
+app.post('/api/admin/reattempt', A, (req, res) => { game.enableReattempt(req.body.studentId, Number(req.body.round) || 0); res.json({ ok: true }); });
 app.post('/api/admin/scores', A, (req, res) => { game.setScores(req.body.attemptId, Number(req.body.round), req.body.parts || {}); res.json({ ok: true }); });
 app.post('/api/admin/publish', A, (req, res) => { game.activeEvent().finalPublished = Boolean(req.body.final); save(); res.json({ ok: true }); });
 app.get('/api/admin/analytics', A, (req, res) => res.json(game.analytics()));
-app.get('/api/admin/export.xlsx', A, (req, res) => {
-  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-  res.setHeader('Content-Disposition', `attachment; filename="promptathon-analytics-${new Date().toISOString().slice(0, 10)}.xlsx"`);
-  res.send(game.exportWorkbook());
+// Reports: ?school=<id> for one school, nothing for every school; schools.zip holds one report per school.
+const attach = (res, type, name) => { res.setHeader('Content-Type', type); res.setHeader('Content-Disposition', `attachment; filename="${name}"; filename*=UTF-8''${encodeURIComponent(name)}`); };
+app.get('/api/admin/export.xlsx', A, async (req, res) => {
+  const school = db.schools.find((s) => s.id === req.query.school);
+  if (req.query.school && !school) return res.status(404).json({ error: 'School not found.' });
+  attach(res, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', game.reportFileName(school?.name));
+  res.send(await game.exportWorkbook(school?.id || ''));
+});
+app.get('/api/admin/export-schools.zip', A, async (req, res) => {
+  if (!db.schools.length) return res.status(400).json({ error: 'Add schools first.' });
+  attach(res, 'application/zip', `Promptathon school reports - ${new Date().toISOString().slice(0, 10)}.zip`);
+  res.send(await game.exportSchoolsZip());
 });
 
 app.post('/api/admin/schools', A, (req, res) => {

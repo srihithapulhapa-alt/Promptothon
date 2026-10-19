@@ -17,7 +17,9 @@ export async function renderAdmin(main, tab, c) {
   main.focus({ preventScroll: true });
   try {
     st.data = await api('/api/admin/overview');
-    if (st.data.pendingRequests) $('#tab-requests').textContent = `Reattempts (${st.data.pendingRequests})`;
+    const reqN = (st.data.pendingRequests || 0) + (st.data.pendingDeletions || 0);
+    if (reqN) $('#tab-requests').textContent = `Reattempts (${reqN})`;
+    if (st.data.pendingLocks) $('#tab-live').textContent = `Live control (${st.data.pendingLocks} waiting)`;
     ({ live, requests, cards, leaderboard, analytics, setup })[tab]();
   } catch (err) { $('#admin-body').innerHTML = `<p class="note bad">${esc(err.message)}</p>`; }
 }
@@ -42,7 +44,7 @@ function live() {
       <div class="field"><label for="f-grade">Grade</label><select id="f-grade" data-filter="grade"><option value="">All grades</option>
         ${ctx.cfg.grades.map((g) => `<option value="${g}" ${String(f.grade) === String(g) ? 'selected' : ''}>Grade ${g}</option>`).join('')}</select></div>
       <div class="field"><label for="f-status">Status</label><select id="f-status" data-filter="status"><option value="">Any status</option>
-        ${[['waiting', 'In lobby'], ['running', 'Live'], ['paused', 'Paused'], ['finished', 'Finished'], ['stopped', 'Stopped'], ['not joined', 'Not joined']].map(([v, l]) => `<option value="${v}" ${f.status === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+        ${[['waiting', 'In lobby'], ['away', 'Not in lobby'], ['running', 'Live'], ['paused', 'Paused'], ['finished', 'Finished'], ['stopped', 'Stopped'], ['not joined', 'Not joined']].map(([v, l]) => `<option value="${v}" ${f.status === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
       <div class="field grow"><label for="f-q">Search</label><input id="f-q" type="search" data-filter="q" placeholder="Name, code or email" value="${esc(f.q)}"></div>
     </div>
     <div class="controls" role="toolbar" aria-label="Test controls">
@@ -51,6 +53,7 @@ function live() {
       <button class="btn ghost" data-admin="control" data-action="pause">Pause</button>
       <button class="btn ghost" data-admin="control" data-action="resume">Resume</button>
       <button class="btn danger" data-admin="control" data-action="stop">Stop</button>
+      <button class="btn ghost" data-admin="bulk-reattempt">Reattempt…</button>
       <button class="btn ghost" data-admin="round-time">Timing…</button>
     </div>
     <div id="live-table"></div>`;
@@ -70,11 +73,13 @@ const targets = () => { const rows = filtered(); const sel = rows.filter((s) => 
 
 function statusCell(s) {
   const ph = s.phase;
-  const map = { 'not joined': '<span class="chip">Not joined</span>', waiting: '<span class="chip brand">In lobby</span>',
+  const map = { 'not joined': '<span class="chip">Not joined</span>', waiting: '<span class="chip brand">In lobby</span>', away: '<span class="chip" title="Picked, but their lobby screen isn’t open">Not in lobby</span>',
     paused: '<span class="chip warn">Paused</span>', finished: '<span class="chip ok">Finished</span>', stopped: '<span class="chip ok">Stopped</span>' };
   if (s.status === 'running' && ph) return `<span class="chip warn">Live</span> <span class="small">${esc(ph.title || '')} · ${fmt(ph.remainingMs || 0)}</span>`;
+  if (s.status === 'paused' && s.lock) return `<span class="chip bad">Left test window${s.lock.count > 1 ? ` ×${s.lock.count}` : ''}</span> ${s.lock.requested ? `<span class="chip warn">Asked to continue</span>` : ''}<div class="small">${esc(s.lock.note || '')} · press Resume to let them back in</div>`;
   if (s.status === 'paused' && ph) return `${map.paused} <span class="small">${esc(ph.title || '')} · ${fmt(ph.remainingMs || 0)} left</span>`;
-  return map[s.status] || esc(s.status);
+  const redo = s.redoRound ? ` <span class="small">Round ${s.redoRound} replay</span>` : '';
+  return (map[s.status] || esc(s.status)) + redo;
 }
 const sc = (x) => (x ? (x.pending ? '<span title="AI marking in progress">…</span>' : x.total) : '—');
 
@@ -108,7 +113,7 @@ function questionChoice() {
 async function runControl(action) {
   const list = targets();
   const verbs = { start: 'Start the test for', pause: 'Pause', resume: 'Resume', stop: 'Stop the test for' };
-  const notes = { start: 'Only students waiting in the lobby will start. Everyone starts with the full 27:30 schedule.',
+  const notes = { start: 'Only students whose lobby screen is open right now will start. Everyone starts with the full schedule; students replaying one round play only that round (“Same questions” gives them the questions they had before).',
     pause: 'Clocks freeze for live students until you resume.', resume: 'Clocks continue from where they were paused.',
     stop: 'Open rounds are submitted with their saved answers and the test ends. This can’t be undone (use “Enable reattempt” to let a student play again).' };
   if (!list.length) { toast('No students in this selection.'); return; }
@@ -123,6 +128,27 @@ async function runControl(action) {
     st.data = await api('/api/admin/overview');
     liveTable();
   } catch (err) { toast(err.message); }
+}
+
+// Reattempt for the selected students (or everyone shown): the whole test, or one round only.
+async function bulkReattempt() {
+  const list = targets();
+  if (!list.length) { toast('No students in this selection.'); return; }
+  const ended = list.filter((s) => ['finished', 'stopped'].includes(s.status)).length;
+  const ok = await dialog({ title: `Reattempt for ${list.length} student${list.length > 1 ? 's' : ''}`,
+    body: `<fieldset class="stack" style="border:0;padding:0;margin:0"><legend style="font-weight:700;margin-bottom:8px">What should they replay?</legend>
+      <label class="check"><input type="radio" name="rr" value="0" checked><span>The whole test<br><span class="muted small" style="font-weight:400">Their current attempt is archived (scores kept) and they play all three rounds again.</span></span></label>
+      ${[1, 2, 3].map((r) => `<label class="check"><input type="radio" name="rr" value="${r}"><span>Only Round ${r} · ${esc(ctx.cfg.rounds[r].name)}<br><span class="muted small" style="font-weight:400">Other rounds keep their answers and scores.</span></span></label>`).join('')}</fieldset>
+      <p class="small muted">${ended} of ${list.length} have finished their test. A single round can be reopened only for students whose test has ended; nobody who is playing right now is changed. Afterwards they go back to the lobby and play when you press Start.</p>
+      <p class="small muted">${list.slice(0, 8).map((s) => esc(s.name)).join(', ')}${list.length > 8 ? ` and ${list.length - 8} more` : ''}</p>`,
+    actions: [{ label: 'Cancel', value: 'no', kind: 'ghost' }, { label: 'Enable reattempt', value: 'yes' }] });
+  if (ok !== 'yes') return;
+  const round = Number($('input[name=rr]:checked')?.value) || 0;
+  const r = await api('/api/admin/reattempts', { studentIds: list.map((s) => s.id), round });
+  toast(`${round ? `Round ${round}` : 'Whole-test'} reattempt enabled for ${r.done} student${r.done === 1 ? '' : 's'}${r.skipped.length ? `, ${r.skipped.length} skipped` : ''}.`);
+  if (r.skipped.length) await dialog({ title: 'Some students were skipped', body: `<ul class="small">${r.skipped.slice(0, 30).map((x) => `<li>${esc(x)}</li>`).join('')}</ul>${r.skipped.length > 30 ? `<p class="small muted">and ${r.skipped.length - 30} more</p>` : ''}`, actions: [{ label: 'OK', value: 'ok' }] });
+  st.data = await api('/api/admin/overview');
+  liveTable();
 }
 
 // ---------------------------------------------------------------- student detail
@@ -154,16 +180,18 @@ async function detail(id) {
     return a.archived ? `<details style="margin-top:16px"><summary>${head}</summary>${rounds}</details>` : `<div style="margin-top:8px">${head}${rounds || '<p class="muted">No rounds played yet.</p>'}</div>`;
   };
   await dialog({ title: `${s.name} · ${s.code}`, wide: true,
-    body: `<p>Grade ${s.grade} (${bandLabel(s.band)}) · ${esc(s.school)} · <span class="muted">${esc(s.email)}</span></p>
-      <div class="row"><button type="button" class="btn ghost sm" data-admin="reattempt" data-id="${s.id}">Enable reattempt</button>
-        <span class="small muted">Archives the current attempt; the student can then play again with the same question set.</span></div>
+    body: `<p>Grade ${s.grade} (${bandLabel(s.band)}) · ${esc(s.school)} · <span class="muted">${esc(s.email)}</span>${s.phones?.length ? ` · ${s.phones.map(esc).join(', ')}` : ''}</p>
+      <div class="row"><b>Enable reattempt:</b>
+        <button type="button" class="btn ghost sm" data-admin="reattempt" data-id="${s.id}" data-round="0">Whole test</button>
+        ${[1, 2, 3].map((r) => `<button type="button" class="btn ghost sm" data-admin="reattempt" data-id="${s.id}" data-round="${r}">Round ${r} only</button>`).join('')}</div>
+      <p class="small muted">Whole test archives the current attempt (its scores are kept) and the student plays everything again. A single round keeps the other rounds’ answers and scores and replays only that round. Either way the student goes back to the lobby and starts when you press Start.</p>
       ${d.attempts.map((a, i) => attempt(a, i === 0)).join('') || '<p class="muted" style="margin-top:12px">This student hasn’t joined yet.</p>'}`,
     actions: [{ label: 'Close', value: 'close' }] });
 }
 
 // ---------------------------------------------------------------- reattempt requests
 async function requests() {
-  const list = await api('/api/admin/requests');
+  const [list, dels] = await Promise.all([api('/api/admin/requests'), api('/api/admin/deletions')]);
   const when = (t) => (t ? new Date(t).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : '');
   const chip = (r) => ({ pending: '<span class="chip warn">Waiting</span>', approved: '<span class="chip ok">Approved</span>', rejected: '<span class="chip bad">Declined</span>' })[r.status];
   body().innerHTML = `<h1 style="margin:0 0 6px">Reattempt requests</h1>
@@ -175,16 +203,26 @@ async function requests() {
       <td>${chip(r)}${r.status !== 'pending' ? `<div class="small muted">${esc(when(r.decidedAt))}${r.reply ? ` · “${esc(r.reply)}”` : ''}</div>` : ''}</td>
       <td>${r.status === 'pending' ? `<div class="row" style="gap:6px"><button class="btn sm" data-admin="decide" data-id="${r.id}" data-approve="true" data-name="${esc(r.student.name)}">Approve</button>
         <button class="btn ghost sm" data-admin="decide" data-id="${r.id}" data-approve="false" data-name="${esc(r.student.name)}">Decline</button></div>` : ''}</td></tr>`).join('')
-      : '<tr><td colspan="7" class="muted center">No requests yet.</td></tr>'}</tbody></table></div>`;
+      : '<tr><td colspan="7" class="muted center">No requests yet.</td></tr>'}</tbody></table></div>
+    <h2 style="margin-top:32px">Data deletion requests</h2>
+    <p class="muted" style="margin-top:0">Parents and guardians can ask for a child’s data to be erased (Privacy → Delete my data). Delete the student’s rows from the sheet, reply to them, then mark it done.</p>
+    <div class="table-wrap"><table class="t"><thead><tr><th>From</th><th>Student code</th><th>Details</th><th>Requested</th><th>Status</th><th></th></tr></thead><tbody>
+    ${dels.length ? dels.map((d) => `<tr><td><b>${esc(d.name)}</b><div class="small"><a href="mailto:${esc(d.email)}">${esc(d.email)}</a></div></td><td>${esc(d.code) || '—'}</td><td class="small">${esc(d.details) || '—'}</td>
+      <td class="small">${esc(when(d.at))}</td><td>${d.status === 'open' ? '<span class="chip warn">Open</span>' : `<span class="chip ok">Done</span><div class="small muted">${esc(d.by)} · ${esc(when(d.doneAt))}</div>`}</td>
+      <td>${d.status === 'open' ? `<button class="btn sm" data-admin="del-done" data-id="${d.id}">Mark done</button>` : ''}</td></tr>`).join('')
+      : '<tr><td colspan="6" class="muted center">No deletion requests.</td></tr>'}</tbody></table></div>`;
 }
 
 async function decide(id, approve, name) {
   const ok = await dialog({ title: `${approve ? 'Approve' : 'Decline'} ${name}’s request?`,
-    body: `<p>${approve ? 'Their previous attempt is archived (its scores are kept) and they return to the lobby for a fresh attempt.' : 'They will see that the request was declined, along with your message.'}</p>
+    body: `<p>${approve ? 'They return to the lobby for another try.' : 'They will see that the request was declined, along with your message.'}</p>
+      ${approve ? `<div class="field"><label for="rq-round">What should they replay?</label><select id="rq-round">
+        <option value="0">The whole test (previous attempt archived, scores kept)</option>
+        ${[1, 2, 3].map((r) => `<option value="${r}">Only Round ${r} · ${esc(ctx.cfg.rounds[r].name)} (other rounds kept)</option>`).join('')}</select></div>` : ''}
       <div class="field"><label for="rq-msg">Message to the student <span class="hint">(optional)</span></label><textarea id="rq-msg" maxlength="500"></textarea></div>`,
     actions: [{ label: 'Cancel', value: 'no', kind: 'ghost' }, { label: approve ? 'Approve' : 'Decline', value: 'yes', kind: approve ? '' : 'danger' }] });
   if (ok !== 'yes') return;
-  await api(`/api/admin/requests/${id}`, { approve, reply: $('#rq-msg').value });
+  await api(`/api/admin/requests/${id}`, { approve, reply: $('#rq-msg').value, round: approve ? Number($('#rq-round').value) : 0 });
   toast(approve ? 'Approved — the student can rejoin the lobby.' : 'Declined — the student will see your message.');
   renderAdmin(root, 'requests', ctx);
 }
@@ -301,8 +339,17 @@ const hbars = (rows, max, unit = '') => `<div class="hbars">${rows.map((r) => `<
 async function analytics() {
   const a = await api('/api/admin/analytics');
   const maxDist = Math.max(1, ...a.distribution.map((d) => d.count));
-  body().innerHTML = `<div class="row between" style="margin-bottom:16px"><h1 style="margin:0">Analytics · ${esc(a.event)}</h1>
-      <a class="btn" href="/api/admin/export.xlsx" download>Download analytics (Excel)</a></div>
+  const schools = st.data?.schools || (await api('/api/admin/overview')).schools;
+  body().innerHTML = `<h1 style="margin:0 0 12px">Analytics · ${esc(a.event)}</h1>
+    <section class="card paper" style="margin-bottom:20px"><h2 style="margin-bottom:4px">Download reports</h2>
+      <p class="muted small" style="margin-top:0">Formatted Excel workbooks: an overview, results ranked by grade band, thinking skills, a score breakdown, question analysis, every answer and the student list.</p>
+      <div class="row">
+        <a class="btn" href="/api/admin/export.xlsx" download>All schools (Excel)</a>
+        <span class="row" style="gap:8px"><label for="rep-school" class="sr-only">School</label><select id="rep-school" data-admin-change="rep-school" style="width:auto">
+          ${schools.map((s) => `<option value="${s.id}">${esc(s.name)}</option>`).join('') || '<option value="">No schools yet</option>'}</select>
+          <a class="btn ghost" id="rep-one" href="${schools.length ? `/api/admin/export.xlsx?school=${encodeURIComponent(schools[0].id)}` : '#'}" download ${schools.length ? '' : 'aria-disabled="true"'}>One school (Excel)</a></span>
+        <a class="btn ghost" href="/api/admin/export-schools.zip" download ${schools.length ? '' : 'aria-disabled="true"'}>Every school, one file each (ZIP)</a>
+      </div></section>
     <div class="kpis">${[['Registered students', a.kpis.registered], ['In lobby', a.kpis.lobby], ['Playing now', a.kpis.live], ['Finished', a.kpis.finished], ['Average total', a.kpis.avgTotal == null ? '—' : `${a.kpis.avgTotal}/60`]]
       .map(([l, v]) => `<div class="kpi"><div class="muted small">${l}</div><div class="big">${v}</div></div>`).join('')}</div>
     <div class="two">
@@ -384,11 +431,13 @@ document.addEventListener('click', async (e) => {
       return detail(el.dataset.student);
     }
     if (act === 'reattempt') {
-      await api('/api/admin/reattempt', { studentId: el.dataset.id });
-      toast('Reattempt enabled — the student can rejoin the lobby.');
+      const round = Number(el.dataset.round) || 0;
+      await api('/api/admin/reattempt', { studentId: el.dataset.id, round });
+      toast(`${round ? `Round ${round}` : 'Whole-test'} reattempt enabled — the student can rejoin the lobby.`);
       $('#dlg').close();
       return;
     }
+    if (act === 'bulk-reattempt') return await bulkReattempt();
     if (act === 'round-time') {
       const round = el.dataset.round; // set when clicked from Setup: everyone, that round
       return round ? timeDialog({ target: round, action: el.dataset.action }) : timeDialog({ ids: targets().map((x) => x.id), scope: `${targets().length} student${targets().length === 1 ? '' : 's'} in this selection` });
@@ -409,7 +458,8 @@ document.addEventListener('click', async (e) => {
     }
     if (act === 'card-send') { el.disabled = true; await sendReport(await api('/api/admin/scorecards/send', { attemptIds: [el.dataset.id], resend: true })); return renderAdmin(root, 'cards', ctx); }
     if (act === 'cards-test') { el.disabled = true; const r = await api('/api/admin/scorecards/test-email', {}); toast(`Sample sent to ${r.to}.`); el.disabled = false; return; }
-    if (act === 'decide') return decide(el.dataset.id, el.dataset.approve === 'true', el.dataset.name);
+    if (act === 'del-done') { await api(`/api/admin/deletions/${el.dataset.id}`, {}); toast('Marked as done.'); return renderAdmin(root, 'requests', ctx); }
+    if (act === 'decide') return await decide(el.dataset.id, el.dataset.approve === 'true', el.dataset.name);
     if (act === 'lb-scope') { await api('/api/admin/leaderboard-scope', { all: el.dataset.all === 'true' }); st.data = await api('/api/admin/overview'); toast(el.dataset.all === 'true' ? 'Students now see every school in their band.' : 'Students now see only their own school.'); return leaderboard(); }
     if (act === 'lb-band') { st.lbBand = el.dataset.band; return leaderboard(); }
     if (act === 'publish') { await api('/api/admin/publish', { final: el.dataset.final === 'true' }); st.data = await api('/api/admin/overview'); return leaderboard(); }
@@ -430,6 +480,7 @@ document.addEventListener('input', (e) => {
 
 document.addEventListener('change', (e) => {
   if (e.target.dataset.adminChange === 'lb-school') { st.lbSchool = e.target.value; leaderboard(); }
+  if (e.target.dataset.adminChange === 'rep-school') $('#rep-one').href = `/api/admin/export.xlsx?school=${encodeURIComponent(e.target.value)}`;
   if (e.target.dataset.adminChange === 'cards-auto') api('/api/admin/scorecards/auto-send', { on: e.target.checked }).then(() => toast(e.target.checked ? 'Cards will be emailed as soon as you approve them.' : 'Automatic emailing is off.')).catch((err) => toast(err.message));
   if (e.target.dataset.adminChange === 'lb-run') { st.lbRun = e.target.value; leaderboard(); }
   if (e.target.dataset.adminChange === 'r3-mode') api('/api/admin/r3-mode', { mode: e.target.value }).then(() => { toast('Saved.'); return api('/api/admin/overview'); }).then((o) => { st.data = o; }).catch((err) => toast(err.message));

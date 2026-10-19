@@ -10,7 +10,7 @@ import path from 'node:path';
 import { env, saveEnv, bandOf, SKILLS, DATA_SHEET_TITLE, STORE_FLUSH_MS, STORE_URGENT_MS, STORE_MIN_GAP_MS, REPORT_SYNC_MS, SHEET_GRID_ROWS } from './config.js';
 import * as G from './google.js';
 
-export const db = { settings: {}, admins: [], schools: [], events: [], students: [], attempts: [], requests: [], sets: [] };
+export const db = { settings: {}, admins: [], schools: [], events: [], students: [], attempts: [], requests: [], sets: [], consents: [], deletions: [] };
 export const uid = (prefix = '') => prefix + crypto.randomBytes(6).toString('base64url');
 
 // ---------- cell helpers ----------
@@ -43,26 +43,26 @@ const TABLES = [
     fromRow: (c) => { const email = str(c[0]).toLowerCase(); return email && email !== env.defaultAdmin ? { email, addedBy: str(c[1]), addedAt: ms(c[2]) } : null; },
     add: (r) => db.admins.push(r) },
 
-  { name: 'Students', head: ['Student ID', 'Code', 'Name', 'Grade', 'Band', 'School', 'School ID', 'Account email', 'Created', 'Locked in'],
+  { name: 'Students', head: ['Student ID', 'Code', 'Name', 'Grade', 'Band', 'School', 'School ID', 'Account email', 'Created', 'Locked in', 'Phone numbers'],
     list: () => db.students, key: (r) => r.id,
-    toRow: (r, x) => [r.id, r.code, r.name, r.grade, bandOf(r.grade) || '', x.school.get(r.schoolId)?.name || '', r.schoolId, r.email, iso(r.createdAt), iso(r.lockedAt)],
+    toRow: (r, x) => [r.id, r.code, r.name, r.grade, bandOf(r.grade) || '', x.school.get(r.schoolId)?.name || '', r.schoolId, r.email, iso(r.createdAt), iso(r.lockedAt), (r.phones || []).join(', ')],
     reset: () => { db.students = []; },
     fromRow: (c) => (str(c[0]) ? { id: str(c[0]), code: str(c[1]), name: str(c[2]), grade: num(c[3]), schoolId: str(c[6]), email: str(c[7]).toLowerCase(),
-      createdAt: ms(c[8]), lockedAt: ms(c[9]) } : null),
+      createdAt: ms(c[8]), lockedAt: ms(c[9]), phones: str(c[10]).split(/,\s*/).filter(Boolean) } : null),
     add: (r) => db.students.push(r) },
 
   { name: 'Attempts', head: ['Attempt ID', 'Student ID', 'Code', 'Name', 'Status', 'Created', 'Started', 'Paused at', 'Paused ms', 'Ended', 'Device',
-    'Archived', 'Archived at', 'R1', 'R2', 'R3', 'Total', 'Acks (JSON)', 'Schedule (JSON)', 'Event ID', 'Run ID', 'Score card (JSON)'],
+    'Archived', 'Archived at', 'R1', 'R2', 'R3', 'Total', 'Acks (JSON)', 'Schedule (JSON)', 'Event ID', 'Run ID', 'Score card (JSON)', 'Round reattempt (JSON)'],
     list: () => db.attempts, key: (a) => a.id,
     toRow: (a, x) => {
       const s = x.student.get(a.studentId), t = [1, 2, 3].map((r) => total(a.rounds?.[r]));
       return [a.id, a.studentId, s?.code || '', s?.name || '', a.status, iso(a.createdAt), iso(a.startedAt), iso(a.pausedAt), a.pausedMs || 0, iso(a.endedAt),
-        a.deviceId || '', a.archived ? 'yes' : '', iso(a.archivedAt), ...t, t.reduce((n, v) => n + (v || 0), 0), JSON.stringify(a.acks || {}), a.flow ? JSON.stringify(a.flow) : '', a.eventId || '', a.runId || '', a.card ? JSON.stringify(a.card) : ''];
+        a.deviceId || '', a.archived ? 'yes' : '', iso(a.archivedAt), ...t, t.reduce((n, v) => n + (v || 0), 0), JSON.stringify(a.acks || {}), a.flow ? JSON.stringify(a.flow) : '', a.eventId || '', a.runId || '', a.card ? JSON.stringify(a.card) : '', a.redo ? JSON.stringify(a.redo) : ''];
     },
     reset: () => { db.attempts = []; },
     fromRow: (c) => (str(c[0]) ? { id: str(c[0]), studentId: str(c[1]), status: str(c[4]) || 'waiting', createdAt: ms(c[5]), startedAt: ms(c[6]), pausedAt: ms(c[7]),
       pausedMs: num(c[8]), endedAt: ms(c[9]), deviceId: str(c[10]) || null, lastSeen: null, archived: str(c[11]) === 'yes' || undefined, archivedAt: ms(c[12]),
-      acks: parse(c[17], {}), flow: parse(c[18], undefined), eventId: str(c[19]), runId: str(c[20]) || undefined, card: parse(c[21], undefined), rounds: {} } : null),
+      acks: parse(c[17], {}), flow: parse(c[18], undefined), eventId: str(c[19]), runId: str(c[20]) || undefined, card: parse(c[21], undefined), redo: parse(c[22], undefined), rounds: {} } : null),
     add: (a) => db.attempts.push(a) },
 
   { name: 'Rounds', head: ['Attempt ID', 'Round', 'Code', 'Name', 'Set ID', 'Opened', 'Saved', 'Submitted', 'Submit reason', 'Reviewed', 'Score', 'Marking pending',
@@ -100,6 +100,21 @@ const TABLES = [
     fromRow: (c) => (str(c[0]) ? { id: str(c[0]), studentId: str(c[1]), attemptId: str(c[2]), note: str(c[6]), status: str(c[7]) || 'pending', reply: str(c[8]),
       createdAt: ms(c[9]), decidedAt: ms(c[10]), decidedBy: str(c[11]) } : null),
     add: (r) => db.requests.push(r) },
+
+  // Parent / guardian consent given when a student is added, and requests to erase a child's data (DPDP Act, India).
+  { name: 'Consents', head: ['Consent ID', 'Student ID', 'Account email', 'Kind', 'Policy version', 'Given at'],
+    list: () => db.consents, key: (r) => r.id,
+    toRow: (r) => [r.id, r.studentId, r.email, r.kind, r.version, iso(r.at)],
+    reset: () => { db.consents = []; },
+    fromRow: (c) => (str(c[0]) ? { id: str(c[0]), studentId: str(c[1]), email: str(c[2]), kind: str(c[3]), version: str(c[4]), at: ms(c[5]) } : null),
+    add: (r) => db.consents.push(r) },
+
+  { name: 'Deletion Requests', head: ['Request ID', 'Requested by', 'Email', 'Student code', 'Details', 'Requested', 'Status', 'Handled by', 'Handled at'],
+    list: () => db.deletions, key: (r) => r.id,
+    toRow: (r) => [r.id, r.name, r.email, r.code, r.details, iso(r.at), r.status, r.by || '', iso(r.doneAt)],
+    reset: () => { db.deletions = []; },
+    fromRow: (c) => (str(c[0]) ? { id: str(c[0]), name: str(c[1]), email: str(c[2]), code: str(c[3]), details: str(c[4]), at: ms(c[5]), status: str(c[6]) || 'open', by: str(c[7]), doneAt: ms(c[8]) } : null),
+    add: (r) => db.deletions.push(r) },
 
   // Derived from the saved answers (see scorecard.js) and kept in the sheet so cards can be produced later from stored data.
   { name: 'Scorecards', derived: true,

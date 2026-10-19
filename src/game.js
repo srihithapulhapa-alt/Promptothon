@@ -1,8 +1,8 @@
 // Game engine: events, students, attempts, the server-side clock, admin controls, results and exports.
 import crypto from 'node:crypto';
-import * as XLSX from 'xlsx';
-import { env, BANDS, GRADES, bandOf, ROUNDS, SCORE_PARTS, LIFELINES_PER_ROUND, SAVE_GRACE_MS, R3_GENERATIONS,
-  AWARDS, EVENT_NAME, ROUND_MINUTES_RANGE, PHASE_SECONDS_RANGE, TIME_ADJUST_RANGE, R3_MODES } from './config.js';
+import { zipSync } from 'fflate';
+import { env, POLICY_VERSION, BANDS, GRADES, bandOf, ROUNDS, SCORE_PARTS, LIFELINES_PER_ROUND, SAVE_GRACE_MS, R3_GENERATIONS,
+  AWARDS, EVENT_NAME, ROUND_MINUTES_RANGE, PHASE_SECONDS_RANGE, TIME_ADJUST_RANGE, R3_MODES, LOBBY_SEEN_MS, MAX_PHONES, APP_NAME, SKILL_LABELS } from './config.js';
 import { db, save, uid } from './store.js';
 import { getFlow, drawRound, publicView, bandProblems, imageFor } from './bank.js';
 import { scorecards, scorecard, baseCard, renderScorecard } from './scorecard.js';
@@ -77,15 +77,29 @@ export const displayName = (s) => {
   return rest.length ? `${first} ${rest.at(-1)[0].toUpperCase()}.` : first;
 };
 
-export function createStudent(email, { name, grade, schoolId }) {
+// Optional phone numbers: as many as the family wants (up to MAX_PHONES), each 6–15 digits with an optional leading +.
+function cleanPhones(list) {
+  const out = [];
+  for (const raw of (Array.isArray(list) ? list : [list]).map((x) => clip(x, 30).trim()).filter(Boolean)) {
+    const digits = raw.replace(/[\s().-]/g, '');
+    if (!/^\+?\d{6,15}$/.test(digits)) fail(`“${raw}” doesn’t look like a phone number. Use digits only, with + for the country code if needed.`);
+    if (!out.includes(digits)) out.push(digits);
+  }
+  if (out.length > MAX_PHONES) fail(`You can add up to ${MAX_PHONES} phone numbers.`);
+  return out;
+}
+
+export function createStudent(email, { name, grade, schoolId, phones, consent }) {
+  if (consent !== true) fail('Please confirm the parent or guardian consent first.');
   name = clip(name, 60).replace(/\s+/g, ' ').trim();
   grade = Number(grade);
   if (name.length < 2) fail('Please enter the student’s name.');
   if (!GRADES.includes(grade)) fail('Please choose a grade between 3 and 12.');
   if (!db.schools.some((s) => s.id === schoolId)) fail('Please choose a school.');
   if (studentsOf(email).some((s) => s.name.toLowerCase() === name.toLowerCase() && s.grade === grade)) fail('This student already exists for your account.');
-  const s = { id: uid('st_'), code: newCode(), email, name, grade, schoolId, createdAt: now(), lockedAt: null };
+  const s = { id: uid('st_'), code: newCode(), email, name, grade, schoolId, phones: cleanPhones(phones), createdAt: now(), lockedAt: null };
   db.students.push(s);
+  db.consents.push({ id: uid('cn_'), studentId: s.id, email, kind: 'guardian', version: POLICY_VERSION, at: now() });
   save(true);
   return s;
 }
@@ -93,6 +107,11 @@ export function createStudent(email, { name, grade, schoolId }) {
 // ---------- attempts ----------
 export const currentAttempt = (studentId, eventId = activeEvent().id) =>
   db.attempts.find((a) => a.studentId === studentId && a.eventId === eventId && !a.archived);
+
+// A waiting attempt is only "in the lobby" while that student's lobby screen is open (it checks in every second).
+// Otherwise it is 'away' — e.g. a sibling on the same account who was picked earlier but isn't playing now.
+export const inLobby = (a) => a.status === 'waiting' && Boolean(a.lastSeen) && now() - a.lastSeen < LOBBY_SEEN_MS;
+export const statusOf = (a) => (a.status === 'waiting' && !inLobby(a) ? 'away' : a.status);
 
 function ensureAttempt(student) {
   let a = currentAttempt(student.id);
@@ -122,6 +141,7 @@ export function selectStudent(session, studentId) {
 export function releaseStudent(session) {
   const a = session.studentId && currentAttempt(session.studentId);
   if (a && LIVE.includes(a.status)) fail('The test has started — you can’t change the student now.', 409);
+  if (a?.status === 'waiting') Object.assign(a, { lastSeen: null, deviceId: null }); // left the lobby
   session.studentId = null;
   save();
 }
@@ -219,7 +239,7 @@ function openRound(a, r) {
   if (a.rounds[r]) return a.rounds[r];
   for (let k = 1; k < r; k++) finalize(a, k, 'time'); // earlier rounds count towards the adaptive draw
   const student = studentById(a.studentId);
-  const set = ensureSet(runOf(a), bandOf(student.grade), r);
+  const set = ensureSet(a.redo?.round === r && a.redo.run ? a.redo.run : runOf(a), bandOf(student.grade), r);
   a.rounds[r] = { setId: set.id, openedAt: now(), draft: {}, savedAt: null, submittedAt: null, lifelines: { used: [], data: {} }, generations: [], score: null };
   save();
   return a.rounds[r];
@@ -251,7 +271,8 @@ export function tick() {
   // Pass 1: close every round that is past its cutoff, so adaptive draws in pass 2 see all scores.
   for (const a of live) {
     for (const r of [1, 2, 3]) {
-      if (a.rounds[r] && !a.rounds[r].submittedAt && elapsed(a, t) >= roundWindow(a, r).end + SAVE_GRACE_MS) finalize(a, r, 'time');
+      const w = roundWindow(a, r); // a round reattempt's schedule holds only that round
+      if (a.rounds[r] && !a.rounds[r].submittedAt && (!w || elapsed(a, t) >= w.end + SAVE_GRACE_MS)) finalize(a, r, 'time');
     }
   }
   for (const a of live) {
@@ -273,7 +294,7 @@ function cleanDraft(r, d = {}) {
       spot: { paragraph: clip(d.spot?.paragraph, 4), why: clip(d.spot?.why) }, match: { evidence: clip(d.match?.evidence, 4), why: clip(d.match?.why) },
       repair: { text: clip(d.repair?.text), why: clip(d.repair?.why) } };
   }
-  return { prompt: clip(d.prompt, 3000), c1: clip(d.c1, 400), c2: clip(d.c2, 400), c3: clip(d.c3, 400), finalPick: clip(d.finalPick, 2) };
+  return { prompt: clip(d.prompt, 3000), finalPick: clip(d.finalPick, 2) };
 }
 
 function saveDraft(a, r, draft) {
@@ -303,10 +324,10 @@ function stateFor(a, student, extra = {}) {
   return {
     attemptId: a.id, scorecard: Boolean(approvedCardOf(student.id)),
     student: { id: student.id, code: student.code, name: student.name, grade: student.grade, band: bandOf(student.grade), school: schoolName(student.schoolId) },
-    status: a.status, paused: Boolean(a.pausedAt), phase: ph, acks: a.acks,
+    status: a.status, paused: Boolean(a.pausedAt), lock: a.acks._lock || null, phase: ph, acks: a.acks,
     roundSeconds: Object.fromEntries([1, 2, 3].map((r) => [r, flowOf(a).find((p) => p.key === `r${r}`)?.sec])), request: requestFor(a, student.id),
     round: rec && { submitted: Boolean(rec.submittedAt), savedAt: rec.savedAt },
-    results: summary(a), final: activeEvent().finalPublished, ...extra,
+    results: summary(a), final: activeEvent().finalPublished, redoRound: a.redo?.round || null, ...extra,
   };
 }
 
@@ -332,6 +353,50 @@ export function sync(session, { deviceId, round, draft, ack }) {
   const saved = round && draft ? saveDraft(a, Number(round), draft) : null;
   save();
   return stateFor(a, student, { saved });
+}
+
+// A student who leaves the test window during a round is paused until the host lets them back in.
+// The record lives in `acks._lock` (the acks cell is already saved with the attempt).
+export function leaveWindow(session, deviceId) {
+  const { student, attempt: a } = mine(session);
+  checkDevice(a, deviceId);
+  const ph = phaseOf(a);
+  if (a.status === 'running' && ph.type === 'round' && !a.rounds[ph.round]?.submittedAt) {
+    const prev = a.acks._lock;
+    Object.assign(a, { status: 'paused', pausedAt: now() });
+    a.acks._lock = { at: now(), count: (prev?.count || 0) + 1, requested: false, note: '' };
+    save(true);
+  }
+  return stateFor(a, student);
+}
+
+export function lockRequest(session, note) {
+  const { student, attempt: a } = mine(session);
+  if (!a.acks._lock) fail('Nothing to ask the host about.', 409);
+  Object.assign(a.acks._lock, { requested: true, note: clip(note, 300).trim(), requestedAt: now() });
+  save(true);
+  return stateFor(a, student);
+}
+
+export const pendingLocks = () => db.attempts.filter((a) => a.status === 'paused' && a.acks?._lock?.requested && !a.archived).length;
+
+export function requestDeletion(email, { name, contact, code, details }) {
+  name = clip(name, 80).trim(); contact = clip(contact, 120).trim(); code = clip(code, 20).trim(); details = clip(details, 600).trim();
+  if (name.length < 2) fail('Please enter your name.');
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contact)) fail('Please enter an email address we can reply to.');
+  if (db.deletions.filter((d) => d.status === 'open' && d.email === contact.toLowerCase()).length >= 3) fail('We already have your requests. We will be in touch soon.', 429);
+  const r = { id: uid('dl_'), name, email: contact.toLowerCase(), code, details, at: now(), status: 'open', by: '', doneAt: null, account: email || '' };
+  db.deletions.push(r);
+  save(true);
+  return { ok: true };
+}
+
+export const listDeletions = () => [...db.deletions].sort((x, y) => (x.status === 'open' ? 0 : 1) - (y.status === 'open' ? 0 : 1) || y.at - x.at);
+export function closeDeletion(id, adminEmail) {
+  const r = db.deletions.find((x) => x.id === id);
+  if (!r) fail('Request not found.', 404);
+  Object.assign(r, { status: 'done', by: adminEmail, doneAt: now() });
+  save(true);
 }
 
 export function takeover(session, deviceId) {
@@ -402,7 +467,7 @@ export function submitRound(session, { deviceId, round, draft }) {
 export async function generateR3(session, { deviceId, prompt }) {
   const { a, r, rec, student } = liveRound(session, deviceId);
   if (r !== 3 || rec.submittedAt || a.status !== 'running') fail('The AI tool is only available during Round 3.');
-  if (setById(rec.setId).content.target?.type === 'image') fail('This target is a picture, so there is no AI tool here. Write your prompt and your three connections.');
+  if (setById(rec.setId).content.target?.type === 'image') fail('This target is a picture, so there is no AI tool here. Write your prompt.');
   prompt = clip(prompt, 3000).trim();
   if (prompt.length < 5) fail('Write your prompt first.');
   if (rec.generations.length >= R3_GENERATIONS) fail(`You have used both AI generations.`);
@@ -428,7 +493,12 @@ export function control(action, studentIds, { questions } = {}) {
     const s = studentById(id);
     const a = s && currentAttempt(s.id, ev.id);
     if (!a) { out.skipped++; continue; }
-    if (action === 'start' && a.status === 'waiting') {
+    if (action === 'start' && a.status === 'waiting' && a.redo && inLobby(a)) { // a round reattempt: just that round's briefing and round
+      const r = a.redo.round;
+      a.redo.run = questions === 'new' ? uid('run_') : null; // 'same' = the questions this student had before
+      Object.assign(a, { status: 'running', startedAt: t, pausedAt: null, pausedMs: 0, flow: getFlow().filter((p) => p.round === r && (p.type === 'brief' || p.type === 'round'))
+        .map(({ key, type, round, sec, title, script }) => ({ key, type, round, sec: type === 'round' ? roundMinutes()[round] * 60 : phaseSeconds()[type], title, script })) });
+    } else if (action === 'start' && a.status === 'waiting' && inLobby(a)) {
       const band = bandOf(s.grade);
       const problems = bandProblems(band, r3Mode());
       if (problems.length) { out.errors.push(`${BANDS.find((b) => b.id === band).label}: ${problems.join(', ')}`); continue; }
@@ -439,6 +509,7 @@ export function control(action, studentIds, { questions } = {}) {
       Object.assign(a, { status: 'paused', pausedAt: t });
     } else if (action === 'resume' && a.status === 'paused') {
       Object.assign(a, { status: 'running', pausedMs: a.pausedMs + (t - a.pausedAt), pausedAt: null });
+      delete a.acks._lock;
     } else if (action === 'stop' && LIVE.includes(a.status)) {
       if (a.pausedAt) { a.pausedMs += t - a.pausedAt; a.pausedAt = null; }
       for (const r of [1, 2, 3]) finalize(a, r, 'stopped');
@@ -451,14 +522,39 @@ export function control(action, studentIds, { questions } = {}) {
   return out;
 }
 
-export function enableReattempt(studentId) {
+// round 0 = the whole test again (the old attempt is archived with its scores). Round 1–3 = only that round again:
+// the other rounds keep their answers and scores, the old round is kept in a.redo.history, and Start plays just that round.
+export function enableReattempt(studentId, round = 0) {
   const a = currentAttempt(studentId);
+  round = Number(round) || 0;
   if (a && LIVE.includes(a.status)) fail('Stop this student’s test before enabling a reattempt.');
-  if (a) { a.archived = true; a.archivedAt = now(); }
-  const s = studentById(studentId);
-  if (s) ensureAttempt(s);
+  if (round) {
+    if (![1, 2, 3].includes(round)) fail('Choose a round.');
+    if (!a || !['finished', 'stopped'].includes(a.status)) fail('A round can be reopened only after the student’s test has ended.');
+    const old = a.rounds[round];
+    const history = [...(a.redo?.history || []), { round, at: now(), prev: old ? { setId: old.setId, submittedAt: old.submittedAt, draft: old.draft, score: old.score } : null }];
+    delete a.rounds[round];
+    delete a.acks[`r${round}`];
+    a.redo = { round, run: null, history };
+    Object.assign(a, { status: 'waiting', startedAt: null, pausedAt: null, pausedMs: 0, endedAt: null, deviceId: null, lastSeen: null });
+    if (a.card) a.card.approved = false; // the score changes, so the score card needs checking again
+  } else {
+    if (a?.status === 'waiting' && !a.redo) fail('This student hasn’t played yet — there is nothing to reattempt.');
+    if (a) { a.archived = true; a.archivedAt = now(); }
+    const s = studentById(studentId);
+    if (s) ensureAttempt(s);
+  }
   for (const r of db.requests) if (r.studentId === studentId && r.status === 'pending') Object.assign(r, { status: 'approved', decidedAt: now(), decidedBy: 'admin' });
   save(true);
+}
+
+// The same for many students at once (Live control). Students it can't apply to are skipped with the reason.
+export function enableReattempts(studentIds, round = 0) {
+  const out = { done: 0, skipped: [] };
+  for (const id of new Set(studentIds)) {
+    try { enableReattempt(id, round); out.done++; } catch (err) { out.skipped.push(`${studentById(id)?.name || id}: ${err.message}`); }
+  }
+  return out;
 }
 
 // ---------- reattempt requests (the student asks, an admin decides) ----------
@@ -484,19 +580,19 @@ export function requestReattempt(session, note) {
 export const pendingRequests = () => db.requests.filter((r) => r.status === 'pending').length;
 
 export function listRequests() {
-  return db.requests.map((r) => {
+  return db.requests.filter((r) => studentById(r.studentId)).map((r) => { // a request whose student was removed is skipped
     const s = studentById(r.studentId), a = db.attempts.find((x) => x.id === r.attemptId), sum = a && summary(a);
     return { id: r.id, status: r.status, note: r.note, reply: r.reply, createdAt: r.createdAt, decidedAt: r.decidedAt, decidedBy: r.decidedBy,
       student: { id: s.id, code: s.code, name: s.name, grade: s.grade, band: bandOf(s.grade), school: schoolName(s.schoolId) }, total: sum?.total ?? null };
   }).sort((x, y) => (x.status === 'pending' ? 0 : 1) - (y.status === 'pending' ? 0 : 1) || y.createdAt - x.createdAt);
 }
 
-export function decideRequest(id, approve, reply, adminEmail) {
+export function decideRequest(id, approve, reply, adminEmail, round = 0) {
   const r = db.requests.find((x) => x.id === id);
   if (!r) fail('Request not found.', 404);
   if (r.status !== 'pending') fail('This request has already been answered.', 409);
   const current = currentAttempt(r.studentId);
-  if (approve && current?.id === r.attemptId) enableReattempt(r.studentId); // otherwise a reattempt was already opened for them
+  if (approve && current?.id === r.attemptId && ['finished', 'stopped'].includes(current.status)) enableReattempt(r.studentId, round); // otherwise a reattempt was already opened for them
   Object.assign(r, { status: approve ? 'approved' : 'rejected', decidedAt: now(), decidedBy: adminEmail, reply: clip(reply, 500).trim() });
   save(true);
 }
@@ -645,8 +741,7 @@ export function answerDetail(a) {
     } else {
       const t = c.target;
       const promptPts = ['purpose', 'content', 'format', 'clarity'].reduce((s, k) => (pts(k) == null ? s : (s ?? 0) + pts(k)), null);
-      row(`${t.id} · prompt`, 'purpose', `Write a prompt for: ${t.title}`, d.prompt, t.example, promptPts, 16);
-      row(`${t.id} · rationale`, 'rationale', 'Three prompt-to-target connections', [d.c1, d.c2, d.c3].filter(Boolean).join(' / '), t.rubric, pts('rationale'), 4);
+      row(`${t.id} · prompt`, 'purpose', `Write a prompt for: ${t.title}`, d.prompt, t.example, promptPts, 20);
       rec.generations.forEach((g, i) => row(`${t.id} · AI ${i + 1}`, '', `AI generation ${i + 1}: ${g.prompt}`, g.output, '', null, null));
       const pick = rec.generations[Number(d.finalPick)];
       if (pick) row(`${t.id} · final`, '', 'Chosen final creation (AI result)', pick.output, '', null, null);
@@ -656,7 +751,7 @@ export function answerDetail(a) {
 }
 
 function resultRows(ev = activeEvent()) {
-  return db.attempts.filter((a) => a.eventId === ev.id && !a.archived && a.status !== 'waiting').map((a) => {
+  return db.attempts.filter((a) => a.eventId === ev.id && !a.archived && a.status !== 'waiting' && studentById(a.studentId)).map((a) => {
     const s = studentById(a.studentId), sum = summary(a);
     const [r1, r2, r3] = sum.rounds.map((x) => x.total);
     return { a, s, run: runOf(a), band: bandOf(s.grade), school: schoolName(s.schoolId), r1, r2, r3, total: sum.total, pending: sum.pending,
@@ -706,7 +801,7 @@ export function analytics() {
   for (const a of attempts) for (const r of [1, 2, 3]) for (const id of a.rounds[r]?.lifelines?.used || []) lifelineUse[id] = (lifelineUse[id] || 0) + 1;
   return {
     event: ev.name,
-    kpis: { registered: db.students.length, lobby: attempts.filter((a) => a.status === 'waiting').length,
+    kpis: { registered: db.students.length, lobby: attempts.filter(inLobby).length,
       live: attempts.filter((a) => LIVE.includes(a.status)).length, finished: rows.filter((x) => ['finished', 'stopped'].includes(x.a.status)).length,
       avgTotal: avg(done.map((x) => x.total)) },
     rounds: [1, 2, 3].map((r) => ({ round: r, name: ROUNDS[r].name, max: 20, avg: avg(rows.map((x) => x[`r${r}`]).filter((v) => v != null)) })),
@@ -756,21 +851,186 @@ export function reportTabs() {
   return tabs;
 }
 
-export function exportWorkbook() {
-  const wb = XLSX.utils.book_new();
-  const an = analytics();
-  const tabs = {
-    Summary: [['Event', an.event], [], ['Registered', an.kpis.registered], ['Finished', an.kpis.finished], ['Average total /60', an.kpis.avgTotal ?? ''], [],
-      ['Round', 'Average /20'], ...an.rounds.map((r) => [r.name, r.avg ?? '']), [],
-      ['School', 'Students', 'Finished', 'Average /60'], ...an.schools.map((s) => [s.name, s.students, s.finished, s.avg ?? '']), [],
-      ['Band', 'Finished', 'Average /60', 'Difficulty drawn'], ...an.bands.map((b) => [b.label, b.finished, b.avg ?? '', b.levels])],
-    'Item Analysis': [['Band', 'Question ID', 'Skill', 'Difficulty', 'Attempts', 'Answered', 'Correct', '% correct', 'Lifeline used'],
-      ...an.items.map((i) => [i.band, i.id, i.skill, i.difficulty, i.attempts, i.answered, i.correct, i.pctCorrect ?? '', i.lifelines])],
-    ...reportTabs(),
-  };
-  for (const [name, rows] of Object.entries(tabs)) XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rows), name);
-  return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+// ---------- Excel reports (the admin's downloads): one for every school, or one school ----------
+// Styled with ExcelJS: a title block on every sheet, dark-orange header rows, light banding, frozen headers,
+// filters, number formats and a short "how to read this" line, so a teacher can open it and understand it at once.
+const XL = { ink: 'FF1D1A17', muted: 'FF5D554E', head: 'FFBF4B11', band: 'FFFFF6EE', line: 'FFE6D5C6', title: 'FFA9440F', good: 'FFE2F2E9', bad: 'FFFDE7E4' };
+const median = (xs) => { if (!xs.length) return null; const v = [...xs].sort((p, q) => p - q), m = v.length >> 1; return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2; };
+const mean = (xs) => (xs.length ? xs.reduce((t, v) => t + v, 0) / xs.length : null);
+
+function sheetTitle(ws, title, sub, width) {
+  ws.mergeCells(1, 1, 1, width); ws.mergeCells(2, 1, 2, width);
+  Object.assign(ws.getCell(1, 1), { value: title, font: { name: 'Calibri', size: 16, bold: true, color: { argb: XL.title } } });
+  Object.assign(ws.getCell(2, 1), { value: sub, font: { name: 'Calibri', size: 10, italic: true, color: { argb: XL.muted } }, alignment: { wrapText: true, vertical: 'top' } });
+  ws.getRow(1).height = 24; ws.getRow(2).height = 30;
+  return 4; // first row for content
 }
+
+// A formatted table: header row, banded body, borders, optional number formats per column. Returns the next free row.
+function xlTable(ws, row, cols, rows, { filter = false, freeze = false, heading = '' } = {}) {
+  if (heading) { Object.assign(ws.getCell(row, 1), { value: heading, font: { name: 'Calibri', bold: true, size: 12, color: { argb: XL.ink } } }); row++; }
+  const top = row, border = { style: 'thin', color: { argb: XL.line } };
+  const hr = ws.getRow(row);
+  cols.forEach((c, i) => {
+    Object.assign(hr.getCell(i + 1), { value: c.h, font: { name: 'Calibri', size: 11, bold: true, color: { argb: 'FFFFFFFF' } }, fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: XL.head } },
+      alignment: { vertical: 'middle', horizontal: c.num ? 'center' : 'left', wrapText: true }, border: { top: border, bottom: border, left: border, right: border } });
+  });
+  hr.height = 30;
+  rows.forEach((vals, r) => {
+    const xr = ws.getRow(++row);
+    cols.forEach((c, i) => {
+      const cell = xr.getCell(i + 1), v = vals[i];
+      cell.value = v === undefined || v === null || Number.isNaN(v) ? (c.num ? '—' : '') : v;
+      cell.border = { top: border, bottom: border, left: border, right: border };
+      cell.font = { name: 'Calibri', size: 11, color: { argb: XL.ink } };
+      cell.alignment = { vertical: 'top', horizontal: c.num ? 'center' : 'left', wrapText: Boolean(c.wrap) };
+      if (c.fmt && typeof v === 'number') cell.numFmt = c.fmt;
+      if (r % 2) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: XL.band } };
+    });
+  });
+  if (!rows.length) { ws.mergeCells(row + 1, 1, row + 1, cols.length); Object.assign(ws.getCell(row + 1, 1), { value: 'Nothing to show yet.', font: { italic: true, color: { argb: XL.muted } } }); row++; }
+  if (filter && rows.length) ws.autoFilter = { from: { row: top, column: 1 }, to: { row, column: cols.length } };
+  if (freeze) ws.views = [{ state: 'frozen', ySplit: top, xSplit: 0, showGridLines: false }];
+  cols.forEach((c, i) => { const col = ws.getColumn(i + 1); col.width = Math.max(col.width || 0, c.w || 14); });
+  return row + 2;
+}
+
+// Everything a report needs, for all schools or one school.
+function reportData(schoolId = '') {
+  const ev = activeEvent(), skills = getSkillsList();
+  const students = db.students.filter((s) => !schoolId || s.schoolId === schoolId);
+  const ids = new Set(students.map((s) => s.id));
+  const results = resultRows(ev).filter((x) => ids.has(x.s.id));
+  const done = results.filter((x) => ['finished', 'stopped'].includes(x.a.status) && !x.pending);
+  // rank within the grade band, across all schools (same tie-breaks as the leaderboard: Round 2, then Round 3 content)
+  const ranks = new Map();
+  for (const b of BANDS) {
+    const ranked = resultRows(ev).filter((x) => x.band === b.id && ['finished', 'stopped'].includes(x.a.status) && !x.pending)
+      .sort((x, y) => y.total - x.total || (y.r2 || 0) - (x.r2 || 0) || y.content - x.content);
+    ranked.forEach((x, i) => { const p = ranked[i - 1]; ranks.set(x.a.id, p && p.total === x.total && (p.r2 || 0) === (x.r2 || 0) && p.content === x.content ? ranks.get(p.a.id) : i + 1); });
+  }
+  const cards = new Map(results.map((x) => [x.a.id, baseCard(x.a)]));
+  const statusText = (x) => ({ running: 'Playing', paused: 'Paused', finished: 'Finished', stopped: 'Ended by host' })[x.a.status] || x.a.status;
+  const scoring = (x) => (x.pending ? 'Being marked' : ev.finalPublished ? 'Final' : 'Provisional');
+  return { ev, skills, students, results, done, ranks, cards, statusText, scoring, school: schoolId ? schoolName(schoolId) : '' };
+}
+
+export async function exportWorkbook(schoolId = '') {
+  const { default: ExcelJS } = await import('exceljs');
+  const D = reportData(schoolId), { ev, skills, results, done } = D;
+  const scope = D.school || 'All schools';
+  const stamp = `Generated ${new Date().toLocaleString('en-GB', { dateStyle: 'long', timeStyle: 'short' })} · Results are ${ev.finalPublished ? 'final' : 'provisional until published as final'}.`;
+  const wb = new ExcelJS.Workbook();
+  wb.creator = APP_NAME; wb.created = new Date();
+  const add = (name, color) => wb.addWorksheet(name, { views: [{ showGridLines: false }], properties: { tabColor: { argb: color } }, pageSetup: { orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0 } });
+  const pct = (v, max) => (v == null ? null : v / max);
+  const totals = done.map((x) => x.total);
+
+  // 1. Overview
+  let ws = add('Overview', 'FFE8682A'), row = sheetTitle(ws, `${ev.name} — ${scope}`, `${stamp} Scores are out of 20 per round and 60 in total.`, 6);
+  row = xlTable(ws, row, [{ h: 'At a glance', w: 34 }, { h: 'Value', num: true, w: 16 }], [
+    ['Students registered', D.students.length],
+    ['Students who started', results.length],
+    ['Students finished (fully marked)', done.length],
+    ['Still playing or being marked', results.length - done.length],
+    ['Average total (out of 60)', mean(totals)], ['Median total (out of 60)', median(totals)],
+    ['Highest total', totals.length ? Math.max(...totals) : null], ['Lowest total', totals.length ? Math.min(...totals) : null],
+  ].map(([k, v]) => [k, typeof v === 'number' && !Number.isInteger(v) ? Math.round(v * 10) / 10 : v]), { heading: 'Summary' });
+  row = xlTable(ws, row, [{ h: 'Round', w: 34 }, { h: 'Average (out of 20)', num: true, fmt: '0.0', w: 16 }, { h: 'Average %', num: true, fmt: '0%', w: 14 }, { h: 'Highest', num: true, w: 12 }, { h: 'Students scored', num: true, w: 16 }],
+    [1, 2, 3].map((r) => { const v = results.map((x) => x[`r${r}`]).filter((n) => n != null); return [`Round ${r} · ${ROUNDS[r].name}`, mean(v), pct(mean(v), 20), v.length ? Math.max(...v) : null, v.length]; }), { heading: 'Rounds' });
+  row = xlTable(ws, row, [{ h: 'Grade band', w: 34 }, { h: 'Finished', num: true, w: 16 }, { h: 'Average (out of 60)', num: true, fmt: '0.0', w: 14 }, { h: 'Highest', num: true, w: 12 }],
+    BANDS.map((b) => { const v = done.filter((x) => x.band === b.id).map((x) => x.total); return [b.label, v.length, mean(v), v.length ? Math.max(...v) : null]; }), { heading: 'Grade bands' });
+  row = xlTable(ws, row, [{ h: 'Total score range', w: 34 }, { h: 'Students', num: true, w: 16 }, { h: 'Share', num: true, fmt: '0%', w: 14 }],
+    [[0, 9], [10, 19], [20, 29], [30, 39], [40, 49], [50, 60]].map(([lo, hi]) => { const n = totals.filter((t) => t >= lo && t <= hi).length; return [`${lo}–${hi}`, n, totals.length ? n / totals.length : null]; }), { heading: 'How scores are spread' });
+
+  // 2. School summary (all-schools report only)
+  if (!schoolId) {
+    ws = add('School Summary', 'FF0F5A8A'); row = sheetTitle(ws, 'School summary', `${stamp} One row per school. Averages use finished, fully marked students.`, 10);
+    xlTable(ws, row, [{ h: 'School', w: 30 }, { h: 'Registered', num: true, w: 12 }, { h: 'Started', num: true, w: 11 }, { h: 'Finished', num: true, w: 11 },
+      { h: 'Avg total /60', num: true, fmt: '0.0', w: 13 }, { h: 'Avg R1 /20', num: true, fmt: '0.0', w: 12 }, { h: 'Avg R2 /20', num: true, fmt: '0.0', w: 12 }, { h: 'Avg R3 /20', num: true, fmt: '0.0', w: 12 },
+      { h: 'Highest', num: true, w: 10 }, { h: 'Top student(s)', w: 34, wrap: true }],
+    db.schools.map((sc) => {
+      const mine = done.filter((x) => x.s.schoolId === sc.id), t = mine.map((x) => x.total), best = t.length ? Math.max(...t) : null;
+      return [sc.name, db.students.filter((s) => s.schoolId === sc.id).length, results.filter((x) => x.s.schoolId === sc.id).length, mine.length,
+        mean(t), mean(mine.map((x) => x.r1).filter((v) => v != null)), mean(mine.map((x) => x.r2).filter((v) => v != null)), mean(mine.map((x) => x.r3).filter((v) => v != null)),
+        best, best == null ? '' : mine.filter((x) => x.total === best).map((x) => x.s.name).join(', ')];
+    }).sort((p, q) => (q[4] ?? -1) - (p[4] ?? -1)), { filter: true, freeze: true });
+  }
+
+  // 3. Results
+  ws = add('Results', 'FF1B6F45'); row = sheetTitle(ws, `Results — ${scope}`, `${stamp} “Rank in band” compares students in the same grade band across all schools. Sorted by school, band and rank.`, 13);
+  const order = [...results].sort((x, y) => x.school.localeCompare(y.school) || String(x.band).localeCompare(String(y.band)) || (D.ranks.get(x.a.id) ?? 1e9) - (D.ranks.get(y.a.id) ?? 1e9) || x.s.name.localeCompare(y.s.name));
+  const resTop = row + 1;
+  row = xlTable(ws, row, [{ h: 'School', w: 26 }, { h: 'Grade band', w: 12 }, { h: 'Rank in band', num: true, w: 10 }, { h: 'Student code', w: 13 }, { h: 'Name', w: 24 }, { h: 'Grade', num: true, w: 8 },
+    { h: 'R1 AI Blitz /20', num: true, w: 11 }, { h: 'R2 AI Case /20', num: true, w: 11 }, { h: 'R3 Creator /20', num: true, w: 11 }, { h: 'Total /60', num: true, w: 10 }, { h: 'Score %', num: true, fmt: '0%', w: 10 },
+    { h: 'Status', w: 14 }, { h: 'Results', w: 13 }],
+  order.map((x) => [x.school, BANDS.find((b) => b.id === x.band)?.label || x.band, D.ranks.get(x.a.id) ?? null, x.s.code, x.s.name, x.s.grade, x.r1, x.r2, x.r3, x.total, x.total / 60, D.statusText(x), D.scoring(x)]),
+  { filter: true, freeze: true });
+  if (order.length) ws.addConditionalFormatting({ ref: `K${resTop}:K${resTop + order.length - 1}`, rules: [{ type: 'dataBar', cfvo: [{ type: 'num', value: 0 }, { type: 'num', value: 1 }], color: { argb: 'FFF4A26B' }, gradient: false }] });
+
+  // 4. Skills: the 11-skill profile per student, with the group average on top
+  ws = add('Skills', 'FF7A4FB5'); const ids = Object.keys(skills).sort();
+  row = sheetTitle(ws, `Thinking skills — ${scope}`, `${stamp} Each skill % = points earned on the questions that test that skill ÷ points available on them. Blank = not tested yet.`, ids.length + 4);
+  const skillRows = order.map((x) => { const c = D.cards.get(x.a.id); return [x.school, x.s.code, x.s.name, x.s.grade, ...ids.map((id) => { const p = c?.skills.find((k) => k.id === id)?.percent; return p == null ? null : p / 100; })]; });
+  row = xlTable(ws, row, [{ h: 'Skill', w: 40 }, { h: 'Average', num: true, fmt: '0%', w: 12 }, { h: 'Students tested', num: true, w: 14 }],
+    ids.map((id, i) => { const v = skillRows.map((r) => r[4 + i]).filter((n) => n != null); return [`${id} · ${skills[id].name}`, mean(v), v.length]; }), { heading: 'Group average' });
+  xlTable(ws, row, [{ h: 'School', w: 26 }, { h: 'Student code', w: 13 }, { h: 'Name', w: 22 }, { h: 'Grade', num: true, w: 8 }, ...ids.map((id) => ({ h: `${id} ${skills[id].name}`, num: true, fmt: '0%', w: 14 }))],
+    skillRows, { heading: 'Each student', filter: true });
+
+  // 5. Score breakdown: how the group did on each scored part
+  ws = add('Score Breakdown', 'FF8A5100'); row = sheetTitle(ws, `Score breakdown — ${scope}`, `${stamp} Average points on each scored part. A low % shows where students need the most practice.`, 5);
+  xlTable(ws, row, [{ h: 'Round', w: 24 }, { h: 'Part', w: 40 }, { h: 'Max points', num: true, w: 11 }, { h: 'Average points', num: true, fmt: '0.0', w: 14 }, { h: 'Average %', num: true, fmt: '0%', w: 12 }],
+    [1, 2, 3].flatMap((r) => SCORE_PARTS[r].map((p) => { const v = results.map((x) => x.a.rounds[r]?.score?.parts?.[p.key]?.points).filter((n) => n != null); return [`Round ${r} · ${ROUNDS[r].name}`, p.label, p.max, mean(v), mean(v) == null ? null : mean(v) / p.max]; })),
+    { filter: true, freeze: true });
+
+  // 6. Question analysis (Round 1)
+  ws = add('Question Analysis', 'FF5D554E'); row = sheetTitle(ws, `Round 1 question analysis — ${scope}`, `${stamp} One row per question. “% correct” is out of the students who were given that question.`, 9);
+  const items = [];
+  for (const set of db.sets.filter((x) => x.eventId === ev.id && x.round === 1)) {
+    const recs = results.map((x) => x.a.rounds[1]).filter((r) => r?.setId === set.id && r.submittedAt);
+    if (!recs.length) continue;
+    for (const q of [...set.content.items, set.content.boss]) {
+      const correct = recs.filter((r) => r.draft.answers?.[q.id] === q.key).length;
+      items.push([BANDS.find((b) => b.id === set.band)?.label || set.band, q.id, q === set.content.boss ? 'Final boss' : SKILL_LABELS[q.skill] || q.skill || '', q.difficulty || '', recs.length,
+        recs.filter((r) => r.draft.answers?.[q.id]).length, correct, correct / recs.length, recs.filter((r) => Object.values(r.lifelines.data).some((l) => l.target === q.id)).length]);
+    }
+  }
+  xlTable(ws, row, [{ h: 'Grade band', w: 12 }, { h: 'Question ID', w: 14 }, { h: 'Question type', w: 26 }, { h: 'Difficulty', w: 11 }, { h: 'Students', num: true, w: 10 },
+    { h: 'Answered', num: true, w: 10 }, { h: 'Correct', num: true, w: 10 }, { h: '% correct', num: true, fmt: '0%', w: 11 }, { h: 'Lifeline used', num: true, w: 12 }], items, { filter: true, freeze: true });
+
+  // 7. Answers (every answer, for checking)
+  ws = add('Answers', 'FF0F5A8A'); row = sheetTitle(ws, `Every answer — ${scope}`, `${stamp} What each student answered, the reference answer and the points given. Use the filters to look at one student or one question.`, 11);
+  xlTable(ws, row, [{ h: 'School', w: 22 }, { h: 'Student code', w: 13 }, { h: 'Name', w: 20 }, { h: 'Round', num: true, w: 8 }, { h: 'Question / part', w: 18 }, { h: 'Question', w: 42, wrap: true },
+    { h: 'Student answer', w: 42, wrap: true }, { h: 'Correct answer / reference', w: 42, wrap: true }, { h: 'Points', num: true, w: 8 }, { h: 'Max', num: true, w: 7 }, { h: 'Marked by', w: 12 }],
+  order.flatMap((x) => answerDetail(x.a).map((d) => [x.school, x.s.code, x.s.name, d.round, d.id, d.question, d.answer, d.correct, d.points, d.max, d.by])), { filter: true, freeze: true });
+
+  // 8. Students (contact list)
+  ws = add('Students', 'FF1B6F45'); row = sheetTitle(ws, `Students — ${scope}`, `${stamp} Everyone registered, including students who haven’t played yet. Contains contact details — share with care.`, 8);
+  const cur = (s) => currentAttempt(s.id, ev.id);
+  xlTable(ws, row, [{ h: 'School', w: 26 }, { h: 'Student code', w: 13 }, { h: 'Name', w: 24 }, { h: 'Grade', num: true, w: 8 }, { h: 'Grade band', w: 12 }, { h: 'Account email', w: 30 }, { h: 'Phone numbers', w: 26 }, { h: 'Test status', w: 16 }],
+    [...D.students].sort((x, y) => schoolName(x.schoolId).localeCompare(schoolName(y.schoolId)) || x.name.localeCompare(y.name)).map((s) => {
+      const a = cur(s), st = a ? statusOf(a) : 'not joined';
+      return [schoolName(s.schoolId), s.code, s.name, s.grade, BANDS.find((b) => b.id === bandOf(s.grade))?.label || '', s.email, (s.phones || []).join(', '),
+        ({ 'not joined': 'Not joined', away: 'Not in lobby', waiting: 'In lobby', running: 'Playing', paused: 'Paused', finished: 'Finished', stopped: 'Ended by host' })[st] || st];
+    }), { filter: true, freeze: true });
+
+  // 9. Reattempts
+  ws = add('Reattempts', 'FF5D554E'); row = sheetTitle(ws, `Reattempt requests — ${scope}`, `${stamp} Requests students sent after their test ended, and the host’s answer.`, 8);
+  const studentIds = new Set(D.students.map((s) => s.id));
+  xlTable(ws, row, [{ h: 'School', w: 24 }, { h: 'Student code', w: 13 }, { h: 'Name', w: 22 }, { h: 'Student note', w: 36, wrap: true }, { h: 'Status', w: 11 }, { h: 'Host reply', w: 30, wrap: true }, { h: 'Requested', w: 18 }, { h: 'Decided', w: 18 }],
+    listRequests().filter((r) => studentIds.has(r.student.id)).map((r) => [r.student.school, r.student.code, r.student.name, r.note, { pending: 'Waiting', approved: 'Approved', rejected: 'Declined' }[r.status] || r.status, r.reply,
+      r.createdAt ? new Date(r.createdAt).toLocaleString('en-GB') : '', r.decidedAt ? new Date(r.decidedAt).toLocaleString('en-GB') : '']), { filter: true, freeze: true });
+
+  return Buffer.from(await wb.xlsx.writeBuffer());
+}
+
+// A ZIP with one school report per school.
+export async function exportSchoolsZip() {
+  const files = {};
+  for (const sc of db.schools) files[`${reportFileName(sc.name)}`] = new Uint8Array(await exportWorkbook(sc.id));
+  return Buffer.from(zipSync(files, { level: 6 }));
+}
+export const reportFileName = (scope = 'All schools') => `Promptathon report - ${scope.replace(/[^\w ]+/g, '').trim() || 'School'} - ${new Date().toISOString().slice(0, 10)}.xlsx`;
 
 // The readable tabs kept in the Google Sheet next to the data tabs (see store.js).
 export const reports = () => { const t = reportTabs(); return { Results: t.Results, Answers: t.Answers }; };

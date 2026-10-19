@@ -30,11 +30,10 @@ export function scoreObjective(round, content, d = {}) {
 
 // ---------- what needs rubric marking ----------
 const R3_CRITERIA = {
-  purpose: 'Goal and recipient. 0 absent/wrong; 1 vague; 2 partial; 3 mostly clear; 4 explicit and suitable.',
-  content: 'Required content coverage. 0 absent; 1 minimal; 2 some; 3 most; 4 all target criteria.',
-  format: 'Sections/layout/length. 0 absent; 1 vague; 2 partial; 3 mostly captured; 4 complete.',
-  clarity: 'Usable instructions. 0 unusable; 1 contradictory; 2 usable with gaps; 3 clear; 4 precise and coherent. Multiple correct prompts accepted.',
-  rationale: 'Links instructions to target. 0 absent; 1 generic; 2 one connection; 3 two connections; 4 three specific connections.',
+  purpose: 'Goal and recipient. 0 absent/wrong; 1 vague; 2 partial; 3 mostly clear; 4 clear and suitable; 5 explicit, specific and suitable.',
+  content: 'Required content coverage. 0 absent; 1 minimal; 2 some; 3 about half; 4 most; 5 all target criteria.',
+  format: 'Sections/layout/length. 0 absent; 1 vague; 2 partial; 3 about half captured; 4 mostly captured; 5 complete.',
+  clarity: 'Usable instructions. 0 unusable; 1 contradictory; 2 usable with gaps; 3 clear; 4 clear with useful constraints; 5 precise and coherent. Multiple correct prompts accepted.',
 };
 
 function subjectiveTasks(round, content, d = {}) {
@@ -58,11 +57,9 @@ function subjectiveTasks(round, content, d = {}) {
   }
   const t = content.target;
   const ref = `Target title: ${t.title} (${t.audience})\nRequired content: ${t.content.join('; ')}\nRequired format: ${t.format.join('; ')}\nExample prompt (one of many valid ones): ${t.example}`;
-  const rationale = [d.c1, d.c2, d.c3].filter(Boolean).map((c, i) => `${i + 1}. ${c}`).join('\n');
   return {
     context: t.type === 'image' ? `Target: the picture attached to this message. Description: ${t.alt}` : `Target output:\n${t.output.join('\n')}`,
-    tasks: Object.entries(R3_CRITERIA).map(([key, rubric]) => ({ key, rubric, reference: ref,
-      student: key === 'rationale' ? rationale : d.prompt })),
+    tasks: Object.entries(R3_CRITERIA).map(([key, rubric]) => ({ key, rubric, reference: ref, student: d.prompt })),
   };
 }
 
@@ -89,14 +86,13 @@ function heuristic(round, content, d = {}) {
     say('repairWhy', wordCount(d.repair?.why) < 4 ? 0 : band(overlap(d.repair.why, `${p.repair.expected} ${p.spot.reason}`), [0.25, 0.1]));
   } else {
     const t = content.target, prompt = d.prompt || '';
+    const five = (x) => Math.round((x * 5) / 4); // the checks below grade 0–4; Round 3 parts are out of 5
     const audienceHit = /grade\s*\d+|pupil|student|class|children|kids|reader|audience/i.test(prompt) ? 2 : 0;
-    say('purpose', Math.min(4, audienceHit + band(overlap(prompt, t.title), [0.5, 0.2])));
-    say('content', band(overlap(prompt, t.content.join(' ')), [0.5, 0.35, 0.2, 0.08]));
-    say('format', band(overlap(prompt, t.format.join(' ')), [0.5, 0.35, 0.2, 0.08]));
+    say('purpose', five(Math.min(4, audienceHit + band(overlap(prompt, t.title), [0.5, 0.2]))));
+    say('content', five(band(overlap(prompt, t.content.join(' ')), [0.5, 0.35, 0.2, 0.08])));
+    say('format', five(band(overlap(prompt, t.format.join(' ')), [0.5, 0.35, 0.2, 0.08])));
     const n = wordCount(prompt);
-    say('clarity', n === 0 ? 0 : Math.min(4, (n >= 25 && n <= 160 ? 3 : n >= 10 ? 2 : 1) + (overlap(prompt, t.content.join(' ')) >= 0.35 ? 1 : 0)));
-    const linked = [d.c1, d.c2, d.c3].filter((c) => wordCount(c) >= 4 && overlap(c, [...t.content, ...t.format, t.title].join(' ')) >= 0.1).length;
-    say('rationale', linked ? linked + 1 : [d.c1, d.c2, d.c3].some((c) => wordCount(c) > 0) ? 1 : 0);
+    say('clarity', n === 0 ? 0 : five(Math.min(4, (n >= 25 && n <= 160 ? 3 : n >= 10 ? 2 : 1) + (overlap(prompt, t.content.join(' ')) >= 0.35 ? 1 : 0))));
   }
   return pts;
 }

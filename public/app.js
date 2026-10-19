@@ -12,11 +12,12 @@ const minutesNow = () => (p.active && p.state?.roundSeconds
   ? Object.fromEntries([1, 2, 3].map((r) => [r, Math.max(1, Math.round(p.state.roundSeconds[r] / 60))])) : cfg.roundMinutes);
 const minuteText = (m) => `${m} minute${m === 1 ? '' : 's'}`;
 const roundsPhrase = (m) => (m[1] === m[2] && m[2] === m[3] ? `three rounds of ${minuteText(m[1])} each` : `three rounds of ${m[1]}, ${m[2]} and ${m[3]} minutes`);
+const minutesPhrase = () => { const m = minutesNow(); return m[1] === m[2] && m[2] === m[3] ? `${minuteText(m[1])}` : `${m[1]}, ${m[2]} and ${m[3]} minutes`; };
 const fillRule = (text, m, round) => text.replace('{rounds}', roundsPhrase(m)).replace('{r}', round ? minuteText(m[round]) : '');
 let cfg, me;
 
-export async function api(url, body, method) {
-  const res = await fetch(url, { method: method || (body ? 'POST' : 'GET'),
+export async function api(url, body, method, timeoutMs = 0) {
+  const res = await fetch(url, { method: method || (body ? 'POST' : 'GET'), signal: timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined,
     headers: body ? { 'content-type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined });
   const data = (res.headers.get('content-type') || '').includes('json') ? await res.json() : {};
   if (!res.ok) { const e = new Error(data.error || 'Something went wrong.'); e.status = res.status; e.code = data.code; throw e; }
@@ -176,7 +177,12 @@ function rangeAt(map, idx, len) {
 // ---------------------------------------------------------------- shell
 const narration = (script) => `<div class="bubble" id="narr-text"><b>Briefing</b>${esc(script)}</div>`;
 
+const syncTopH = () => { const r = document.documentElement.style; r.setProperty('--top-h', `${$('#top').offsetHeight}px`); r.setProperty('--foot-h', `${$('.foot').offsetHeight}px`); }; // sticky bars sit just under the header
+new ResizeObserver(syncTopH).observe($('#top'));
+addEventListener('resize', syncTopH);
+
 function renderShell() {
+  syncTopH();
   const nav = $('#nav'), acct = $('#account');
   const here = location.hash.split('?')[0];
   const link = (href, label) => `<a href="${href}" ${here.startsWith(href) ? 'aria-current="page"' : ''}>${label}</a>`;
@@ -196,11 +202,12 @@ function rulesDialog() {
   const m = minutesNow();
   const rounds = [1, 2, 3].map((r) => {
     const R = cfg.rounds[r];
-    return `<h3 style="margin-top:20px">${R.icon} Round ${r} · ${esc(R.name)} <span class="chip">${m[r]} min · ${R.max} pts</span></h3>${list(cfg.rules[r].map((t) => fillRule(t, m, r)))}
+    return `<h3 style="margin-top:20px">${R.icon} Round ${r} · ${esc(R.name)} <span class="chip">${m[r]} min · ${R.max} pts</span></h3>
+      ${R.intro.map((t) => `<p class="muted" style="margin:0 0 8px">${esc(t)}</p>`).join('')}${list(cfg.rules[r])}
       <p class="small muted" style="margin-top:8px">Lifelines: ${R.lifelines.map((l) => `<b>${esc(l.name)}</b> — ${esc(l.desc)}`).join(' · ')}</p>`;
   }).join('');
   dialog({ title: 'How to play', wide: true,
-    body: `<div id="rules-all" class="measure">${speakBtn('#rules-all', 'Read the rules aloud')}<h3 style="margin-top:12px">The basics</h3>${list(cfg.rules.general.map((t) => fillRule(t, m)))}${rounds}</div>`,
+    body: `<div id="rules-all" class="measure">${speakBtn('#rules-all', 'Read the rules aloud')}<h3 style="margin-top:12px">Before you start</h3>${list(cfg.rules.start)}<h3 style="margin-top:20px">Play fair</h3>${list(cfg.rules.general)}${rounds}</div>`,
     actions: [{ label: 'Got it', value: 'ok' }] });
 }
 
@@ -213,14 +220,19 @@ async function route() {
   const [name = '', sub = ''] = location.hash.replace(/^#\/?/, '').split('?')[0].split('/');
   renderShell();
   if (!(me.signedIn && me.role === 'admin')) { try { cfg.roundMinutes = (await api('/api/config')).roundMinutes; } catch { /* keep the last values */ } }
+  if (name === 'legal') return (await import('/legal.js')).renderLegal(main, sub || 'privacy', { cfg, api, toast, esc });
   if (!me.signedIn) return landing();
   if (name === 'admin' && me.role === 'admin') {
     const m = await import('/admin.js');
     return m.renderAdmin(main, sub || 'live', { cfg, me });
   }
   if (me.role === 'admin') { location.hash = '#/admin/live'; return; }
-  if (name === 'students' || !me.studentId) return studentsPage();
+  if (name === 'students' || !me.studentId) {
+    try { me = await api('/api/me'); } catch { /* keep the last copy */ } // statuses change (lobby, replay), so fetch them fresh
+    return studentsPage();
+  }
   if (name === 'leaderboard') return leaderboardPage();
+  if (name === 'welcome') return welcomePage();
   return playPage();
 }
 
@@ -229,54 +241,107 @@ function focusMain() { main.focus({ preventScroll: true }); window.scrollTo(0, 0
 // ---------------------------------------------------------------- landing
 const GOOGLE_G = '<svg viewBox="0 0 48 48" aria-hidden="true"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z"/><path fill="#FF3D00" d="m6.3 14.7 6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-7.9l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z"/></svg>';
 
+// Foldling, our mascot: the celebration clip with its "Congratulations!" bubble cropped off (see .mascot in styles.css).
+// On the main pages it loops for as long as the page is open; the pop-up tip plays once. Still for anyone who prefers reduced motion.
+const mascot = (cls = '') => `<div class="mascot ${cls}" aria-hidden="true"><video src="/star_congratulations.webm" muted playsinline preload="auto"></video></div>`;
+function startMascot(root = document, loopsMax = Infinity) {
+  for (const v of root.querySelectorAll('.mascot video')) {
+    if (matchMedia('(prefers-reduced-motion: reduce)').matches) { v.currentTime = 0.01; continue; }
+    v.loop = loopsMax === Infinity;
+    let loops = 0;
+    v.addEventListener('ended', () => { if (++loops < loopsMax) v.play().catch(() => {}); });
+    v.addEventListener('pause', () => { if (v.loop && !v.ended && !document.hidden && v.isConnected) v.play().catch(() => {}); }); // resumes if the browser pauses it
+    v.play().catch(() => {});
+  }
+}
+
+// A six-panel comic strip. Panels are plain images, so the page stays light and works with a screen reader.
+const COMICS = { rain: 'Foldling and the rain', tiger: 'Foldling and the tiger', dog: 'Foldling and the dog' };
+const comic = (name) => `<figure class="comic"><figcaption>${esc(COMICS[name])}</figcaption>
+  <div class="comic-grid">${[1, 2, 3, 4, 5, 6].map((n) => `<img src="/comics/${name}-${n}.jpg" alt="${esc(COMICS[name])}, panel ${n} of 6" loading="lazy">`).join('')}</div></figure>`;
+
+// Foldling pops up mid-round with a word of encouragement, then slides away.
+function mascotTip(text) {
+  $('#tip-pop')?.remove();
+  const el = document.createElement('div');
+  el.id = 'tip-pop';
+  el.className = 'tip-pop';
+  el.setAttribute('aria-hidden', 'true'); // the same words go to the screen-reader live region below
+  el.innerHTML = `${mascot('sm')}<p class="guide-say">${esc(text)}</p>`;
+  document.body.append(el);
+  announce(text);
+  startMascot(el, 1);
+  setTimeout(() => { el.classList.add('out'); setTimeout(() => el.remove(), 500); }, 6500);
+}
+const TIPS = { half: 'You’re halfway there. Keep going!', near: 'Almost there! Take a moment to check your answers.' };
+const roundPills = () => `<ul class="pills">${[1, 2, 3].map((r) => `<li class="tint-${r}"><span aria-hidden="true">${cfg.rounds[r].icon}</span> ${esc(cfg.rounds[r].name)}</li>`).join('')}</ul>`;
+
 function landing() {
   const err = new URLSearchParams(location.search).get('error');
   main.innerHTML = `<div class="wrap">
-    <section class="hero">
-      <div>
-        <div class="kicker">The AI Club presents</div>
+    <section class="home">
+      ${mascot()}
+      <div class="home-text">
         <h1>Prompt&shy;athon</h1>
-        <p class="sub">The AI Challenge <u>Arena</u></p>
-        <p class="lead">${roundsPhrase(cfg.roundMinutes).replace(/^t/, 'T')}. No guessing what the AI wants — you make the calls: spot the trap, fix the prompt, match the output.</p>
-        ${err ? '<p class="note bad">Sign-in didn’t work. Please try again with your Google account.</p>' : ''}
-        <div class="row" style="margin-top:24px">
+        <p class="home-lead">Three fun AI challenges. Are you ready?</p>
+        ${roundPills()}
+        ${err ? `<p class="note bad">Sign-in didn’t work. Please try again.</p>` : ''}
+        <div class="row" style="margin-top:28px">
           <a class="btn lg g-btn" href="/auth/google">${GOOGLE_G} Sign in with Google</a>
-          <button class="btn quiet" data-act="rules">Read the rules first</button>
         </div>
-        <p class="small muted" style="margin-top:14px">Students and hosts both sign in here. Hosts go straight to their dashboard.</p>
+        <div class="row" style="margin-top:12px"><button class="btn quiet" data-act="rules">How to play</button></div>
+        <p class="small muted" style="margin-top:8px;max-width:46ch">By signing in you agree to our <a href="#/legal/terms">Terms</a> and <a href="#/legal/privacy">Privacy Policy</a>. Players under 18 need a parent or guardian’s permission.</p>
       </div>
-      <aside class="ticket" aria-label="Today’s programme">
-        ${[1, 2, 3].map((r) => `<div class="ticket-row"><span class="ticket-num">0${r}</span>
-          <div><h3>${esc(cfg.rounds[r].name)}</h3><p>${esc(cfg.rounds[r].tagline)}</p></div>
-          <span class="ticket-meta">${cfg.roundMinutes[r]} min<br>${cfg.rounds[r].max} pts</span></div>`).join('')}
-        <div class="ticket-foot"><span>Individual · ${[1, 2, 3].reduce((t, r) => t + cfg.roundMinutes[r], 0)} min</span><span>60 points</span></div>
-      </aside>
     </section>
-    <h2>How it works</h2>
-    <ol class="steps">
-      <li><b>Sign in with Google.</b><br><span class="muted">One account can hold several students — handy for siblings or a shared class login.</span></li>
-      <li><b>Pick your name and grade.</b><br><span class="muted">You get a student code. Once the test starts, the student can’t be changed.</span></li>
-      <li><b>Wait for your host.</b><br><span class="muted">Everyone in your grade band gets the same questions and the same clock.</span></li>
-    </ol>
-    <div class="card paper row between">
-      <div><b>Reading tools are built in.</b><br><span class="muted">Dyslexia-friendly fonts, bigger text, letter and line spacing, read aloud, a reading ruler and a black & white mode.</span></div>
-      <button class="btn ghost" data-act="settings">Open reading tools</button>
-    </div>
+    <section class="comic-band" aria-label="A little comic from Foldling"><h2 class="center">A quick story with Foldling</h2>${comic('rain')}</section>
   </div>`;
   focusMain();
+  startMascot();
+}
+
+// ---------------------------------------------------------------- welcome (after choosing a student, before the lobby)
+function welcomePage() {
+  const s = me.students.find((x) => x.id === me.studentId);
+  if (!s || !['new', 'waiting', 'away'].includes(s.status)) { location.hash = '#/play'; return; }
+  main.innerHTML = `<div class="wrap">
+    <section class="welcome" id="welcome-text">
+      <div class="welcome-guide">
+        ${mascot('lg')}
+        <p class="guide-say">Hi! I’m <b>Foldling</b>, your guide. Get ready for three fun challenges!</p>
+      </div>
+      <h1>${esc(s.name.split(' ')[0])}, welcome to Bhanzu Promptothon!</h1>
+      <p class="motto"><span class="tint-1">Think fast.</span> <span class="tint-2">Check carefully.</span> <span class="tint-3">Make smart choices with AI.</span></p>
+      <ol class="round-cards">${[1, 2, 3].map((r) => `<li class="tint-${r}"><span class="rc-icon" aria-hidden="true">${cfg.rounds[r].icon}</span>
+        <span class="rc-num">Round ${r}</span><b>${esc(cfg.rounds[r].name)}</b><span class="rc-blurb">${esc(cfg.rounds[r].blurb)}</span></li>`).join('')}</ol>
+      <p class="muted" style="margin:0">${minutesPhrase()} per round · 60 points in total · you play on your own</p>
+      <p class="choice">How would you like to get ready?</p>
+      <div class="row welcome-go">
+        <a class="btn lg" href="#/play">Go straight to the lobby <span aria-hidden="true">→</span></a>
+        <a class="btn lg ghost" href="/guide.html">📖 Take Foldling’s guide first</a>
+        ${speakBtn('#welcome-text', 'Read aloud')}
+      </div>
+      <p class="small muted">Not you? <a href="#/students">Choose a different student</a></p>
+    </section>
+  </div>`;
+  focusMain();
+  startMascot();
 }
 
 // ---------------------------------------------------------------- students
 function studentsPage() {
   const live = me.students.find((s) => s.id === me.studentId && ['running', 'paused'].includes(s.status));
-  const statusChip = (s) => ({ new: '', waiting: '<span class="chip">In lobby</span>', running: '<span class="chip warn">Test in progress</span>',
-    paused: '<span class="chip warn">Paused</span>', finished: '<span class="chip ok">Completed</span>', stopped: '<span class="chip ok">Ended</span>' })[s.status] || '';
+  // 'away' = picked before but not in the lobby right now (e.g. a sibling), so no "In lobby" chip for them
+  const statusChip = (s) => (s.redoRound && ['waiting', 'away'].includes(s.status) ? `<span class="chip brand">Round ${s.redoRound} replay</span>` : '')
+    + ({ new: '', away: '', waiting: '<span class="chip">In lobby</span>', running: '<span class="chip warn">Test in progress</span>',
+      paused: '<span class="chip warn">Paused</span>', finished: '<span class="chip ok">Completed</span>', stopped: '<span class="chip ok">Ended</span>' })[s.status] || '';
   main.innerHTML = `<div class="wrap">
-    <div class="page-head"><div class="kicker">Step 2 of 3</div><h1>Who is playing today?</h1>
-      <p>One Google account can hold several students. Pick yours, or add a new one. Once the test starts, you can’t switch students.</p></div>
+    <div class="page-head"><div class="kicker">Step 2 of 3</div>
+      <div class="welcome-guide start">${mascot('sm')}<p class="guide-say">Who’s playing today? Pick your name, or add yourself.</p></div>
+      <h1>Who is playing today?</h1>
+      <p>One Google account can hold several students. Once the test starts, you can’t switch students.</p></div>
     ${live ? `<p class="note">${esc(live.name)}’s test is in progress on this account. <a href="#/play">Go back to the test</a>.</p>` : ''}
     <div class="grid-cards">
-      ${me.students.map((s) => `<div class="card student-card">
+      ${me.students.map((s, i) => `<div class="card student-card tint-${(i % 3) + 1}" style="--i:${i}">
         <div class="row between"><h3 style="margin:0">${esc(s.name)}</h3>${statusChip(s)}</div>
         <div class="muted">Grade ${s.grade} · ${esc(cfg.bands.find((b) => b.id === s.band)?.label || '')}<br>${esc(s.school || '')}</div>
         <div>Code <span class="code">${esc(s.code)}</span></div>
@@ -290,17 +355,27 @@ function studentsPage() {
           <div class="field grow"><label for="ns-grade">Grade</label><select id="ns-grade" name="grade" required><option value="">Choose</option>${cfg.grades.map((g) => `<option value="${g}">Grade ${g}</option>`).join('')}</select></div>
         </div>
         <div class="field"><label for="ns-school">School</label><select id="ns-school" name="schoolId" required><option value="">Choose your school</option>${me.schools.map((s) => `<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select></div>
+        <fieldset class="field phones"><legend>Phone number <span class="hint">(optional — add as many as you like)</span></legend>
+          <div id="ns-phones" class="stack">${phoneInput(1)}</div>
+          <button type="button" class="btn quiet sm" data-act="add-phone">+ Add another number</button></fieldset>
         <p class="small muted" style="margin:0">Check the grade carefully — it can’t be changed once you start.</p>
+        <label class="check"><input type="checkbox" name="consent" required><span class="small">I am the parent or legal guardian of this child, or I have the parent’s or guardian’s permission. I agree to the
+          <a href="#/legal/privacy" target="_blank" rel="noopener">Privacy Policy</a> and <a href="#/legal/terms" target="_blank" rel="noopener">Terms of Service</a>, and I consent to Promptathon using this child’s name, grade, school and answers to run the event.</span></label>
         <button class="btn">Add student</button>` : '<p class="muted">Your host hasn’t added any schools yet. Please check back in a moment.</p>'}
       </form>
     </div></div>`;
   focusMain();
+  startMascot();
 }
+const phoneInput = (n) => `<input type="tel" name="phone" inputmode="tel" autocomplete="${n === 1 ? 'tel' : 'off'}" maxlength="20" placeholder="e.g. +91 98765 43210" aria-label="Phone number ${n}">`;
 
 document.addEventListener('submit', async (e) => {
   if (e.target.id !== 'add-student') return;
   e.preventDefault();
-  const f = Object.fromEntries(new FormData(e.target));
+  const fd = new FormData(e.target), f = Object.fromEntries(fd);
+  f.phones = fd.getAll('phone').map((x) => x.trim()).filter(Boolean);
+  delete f.phone;
+  f.consent = fd.get('consent') === 'on';
   try {
     const s = await api('/api/students', f);
     me = await api('/api/me');
@@ -340,7 +415,7 @@ async function leaderboardPage() {
 
 // ---------------------------------------------------------------- the test
 const p = {};
-function stopPlay() { clearInterval(p.syncInt); clearInterval(p.clockInt); p.active = false; }
+function stopPlay() { clearInterval(p.syncInt); clearInterval(p.clockInt); p.active = false; document.documentElement.classList.remove('guard'); watermark(''); }
 
 function deviceId() {
   let id = store.get('pt-device');
@@ -350,7 +425,7 @@ function deviceId() {
 
 async function playPage() {
   Object.assign(p, { active: true, state: null, content: null, draft: {}, ver: 0, ackVer: 0, lastKey: '', conflict: false, busy: false,
-    qi: 0, offline: false, savedAt: null, saveError: '', announced: {}, preflight: { sound: false, save: false, tools: false } });
+    qi: 0, sawBrief: {}, offline: false, savedAt: null, saveError: '', announced: {}, preflight: { sound: false, save: false, tools: false } });
   p.device = deviceId();
   main.innerHTML = '<div class="wrap"><p class="page-head">Loading your test…</p></div>';
   try {
@@ -376,7 +451,7 @@ async function syncTick() {
   const sendDraft = p.content && !p.content.submitted && ver !== p.ackVer && p.state?.status === 'running';
   if (sendDraft) { body.round = p.content.round; body.draft = p.draft; }
   try {
-    const st = await api('/api/play/sync', body);
+    const st = await api('/api/play/sync', body, undefined, 8000); // a hung request must not freeze the screen (e.g. stuck on “Paused” after a stop)
     p.offline = false;
     if (!p.preflight.save) { p.preflight.save = true; p.lastKey = ''; }
     if (body.ack === p.pendingAck) p.pendingAck = null;
@@ -414,7 +489,9 @@ function applyState(st) {
     if (phaseChanged) onPhaseChange(st);
     renderPlay();
   }
-  pauseOverlay(st.paused);
+  pauseOverlay(st.paused, st.lock);
+  document.documentElement.classList.toggle('guard', ['running', 'paused'].includes(st.status));
+  watermark(st.student?.code);
 }
 
 // Congratulations star: pops up bottom-left when a round (or the whole test) is finished, drops away ~2s before the next round.
@@ -464,16 +541,25 @@ function onPhaseChange(st) {
   }
 }
 
-function pauseOverlay(paused) {
+function pauseOverlay(paused, lock) {
   let ov = $('#pause-ov');
   main.inert = Boolean(paused);
+  const key = paused ? (lock ? `lock-${lock.requested}` : 'host') : '';
+  if (ov && ov.dataset.key !== key) { ov.remove(); ov = null; }
   if (paused && !ov) {
     ov = document.createElement('div');
     ov.id = 'pause-ov';
+    ov.dataset.key = key;
     ov.className = 'overlay';
-    ov.innerHTML = '<div class="card" role="alertdialog" aria-labelledby="pv-t"><h2 id="pv-t">Paused by your host</h2><p>Your clock is frozen and your answers are saved. Please wait — the test will continue here.</p></div>';
+    ov.innerHTML = lock
+      ? `<div class="card" role="alertdialog" aria-labelledby="pv-t"><h2 id="pv-t">You left the test window</h2>
+          <p>Your clock is paused and your answers are saved. Your host has to let you continue.</p>
+          ${lock.requested ? '<p><span class="chip ok">✓ Request sent</span></p><p class="muted small">Please wait here. The test continues on this screen once your host says yes.</p>'
+            : `<div class="field" style="text-align:left"><label for="lock-note">Why did you need to leave? <span class="hint">(optional)</span></label><textarea id="lock-note" maxlength="300" style="min-height:70px"></textarea></div>
+               <button class="btn" data-act="lock-request">Ask my host to let me continue</button>`}</div>`
+      : '<div class="card" role="alertdialog" aria-labelledby="pv-t"><h2 id="pv-t">Paused by your host</h2><p>Your clock is frozen and your answers are saved. Please wait — the test will continue here.</p></div>';
     document.body.append(ov);
-    announce('The test is paused by your host.');
+    announce(lock ? 'You left the test window. Ask your host to let you continue.' : 'The test is paused by your host.');
   } else if (!paused && ov) { ov.remove(); announce('The test has resumed.'); }
 }
 
@@ -488,6 +574,13 @@ function updateClock() {
     for (const mark of [300000, 60000, 30000]) {
       const id = `${ph.key}-${mark}`;
       if (left <= mark && left > mark - 2000 && !p.announced[id]) { p.announced[id] = true; announce(`${fmt(mark)} left in this round.`); }
+    }
+  }
+  if (ph.type === 'round' && !p.state.paused && !p.state.round?.submitted && ph.durationMs) {
+    const f = left / ph.durationMs; // shown once each, as the clock passes halfway and the last fifth
+    for (const [id, lo, hi] of [['half', 0.44, 0.5], ['near', 0.14, 0.2]]) {
+      const k = `${ph.key}-${id}`;
+      if (f <= hi && f > lo && !p.announced[k]) { p.announced[k] = true; mascotTip(TIPS[id]); }
     }
   }
   if (p.star && p.starUntilPhase && left <= 2000) hideStar();
@@ -516,10 +609,13 @@ function renderPlay() {
   if (st.status === 'waiting') return view(lobbyView());
   if (ph.type === 'done' || ph.type === 'finish') return view(finishView());
   if (ph.type === 'welcome') return view(rulesView('welcome'));
-  if (ph.type === 'brief') return view(rulesView(ph.round));
+  if (ph.type === 'brief') { (p.sawBrief ||= {})[ph.round] = true; return view(rulesView(ph.round)); }
   if (ph.type === 'transition') return view(transitionView(ph.round));
   if (ph.type === 'round') {
-    if (!st.acks[`r${ph.round}`]) return view(rulesView(ph.round, true));
+    if (!st.acks[`r${ph.round}`]) {
+      if (!p.sawBrief?.[ph.round]) return view(rulesView(ph.round, true)); // joined late: they never saw the briefing
+      p.pendingAck = `r${ph.round}`; st.acks[p.pendingAck] = Date.now(); p.lastKey = ''; syncTick(); // read it already — go straight in
+    }
     if (st.round?.submitted || p.content?.submitted) return view(submittedView(ph.round));
     if (!p.content || p.content.round !== ph.round) { loadContent(); return view('<div class="wrap play"><p>Opening the round…</p></div>'); }
     return view(roundView());
@@ -529,8 +625,11 @@ function renderPlay() {
 
 function view(html) {
   const keepScroll = p.content && main.querySelector('.gamebar') && html.includes('gamebar');
-  const y = window.scrollY;
+  const y = window.scrollY, fileTop = $('#casefile')?.scrollTop;
   main.innerHTML = html;
+  if (fileTop && $('#casefile')) $('#casefile').scrollTop = fileTop;
+  startMascot(main);
+  const gb = $('.gamebar'); document.documentElement.style.setProperty('--game-h', `${gb ? gb.offsetHeight : 0}px`); // round 2 fits the screen under the bars
   updateStatus();
   updateClock();
   if (keepScroll) window.scrollTo(0, y); else focusMain();
@@ -564,6 +663,7 @@ function lobbyView() {
   return `<div class="wrap">
     <div class="page-head"><div class="kicker">Step 3 of 3 · Lobby</div><h1>Hi ${esc(s.name.split(' ')[0])}!</h1>
       <p>Check your details and get set up. Your host will start the test for everyone at the same time.</p>
+      ${p.state.redoRound ? `<p class="note">Your host reopened <b>Round ${p.state.redoRound} · ${esc(cfg.rounds[p.state.redoRound].name)}</b> for you. You’ll play just that round — your other rounds are kept.</p>` : ''}
       ${p.state.request?.status === 'approved' ? `<p class="note">Your host approved your reattempt.${p.state.request.reply ? ` “${esc(p.state.request.reply)}”` : ''}</p>` : ''}</div>
     <div class="two">
       <div class="card stack">
@@ -583,7 +683,8 @@ function lobbyView() {
         </ul>
         <div class="waiting"><span class="pulse" aria-hidden="true"></span><span>Waiting for your host to start the test…</span></div>
       </div>
-    </div></div>`;
+    </div>
+    <section class="comic-band" aria-label="Comics to read while you wait"><h2 class="center">While you wait — more stories with Foldling</h2>${comic('tiger')}${comic('dog')}</section></div>`;
 }
 
 function rulesView(kind, late = false) {
@@ -592,34 +693,41 @@ function rulesView(kind, late = false) {
   const R = isWelcome ? null : cfg.rounds[kind];
   const ackKey = isWelcome ? 'welcome' : `r${kind}`;
   const acked = Boolean(st.acks[ackKey]);
-  const rules = (isWelcome ? cfg.rules.general : cfg.rules[kind]).map((t) => fillRule(t, minutesNow(), isWelcome ? 0 : kind));
-  const lifelines = R ? `<h3 style="margin-top:20px">Your lifelines</h3><p class="muted">${cfg.lifelinesPerRound === 1 ? 'You can use only one of these, once.' : 'Each lifeline can be used once in this round.'} They cost no points and never add time.</p>
-    <ul>${R.lifelines.map((l) => `<li><b>${esc(l.name)}</b> — ${esc(l.desc)}</li>`).join('')}</ul>` : '';
+  const list = (items, i0 = 0) => `<ol class="rules">${items.map((r, i) => `<li style="--i:${i + i0}"><span>${esc(r)}</span></li>`).join('')}</ol>`;
+  const minutes = Math.round((st.roundSeconds?.[kind] || 480) / 60);
+  const lifelines = R ? `<h3 style="margin-top:20px">Your lifelines</h3>
+    <ul>${R.lifelines.map((l) => `<li><b>${esc(l.name)}</b> — ${esc(l.desc)}</li>`).join('')}</ul>
+    <p class="muted">${esc(R.lifelineNote)} They cost no points and never add time.</p>
+    <p><b>Time:</b> ${minuteText(minutes)} · <b>Points:</b> ${esc(R.points)}</p>
+    <div class="guide-says">${mascot('sm')}<p class="guide-say">Foldling says: ${esc(R.says)}</p></div>` : '';
   const sideTitle = late ? `Round ${kind} is running` : isWelcome ? 'Round 1 briefing in' : `Round ${kind} starts in`;
   return `<div class="wrap"><div class="brief">
     <div id="rules-text" class="measure">
-      <div class="kicker">${isWelcome ? 'Before we begin' : `Round ${kind} of 3 · ${Math.round((st.roundSeconds?.[kind] || 480) / 60)} minutes · ${R.max} points`}</div>
-      <div class="round-title"><h1>${isWelcome ? 'How the arena works' : `${R.icon} ${esc(R.name)}`}</h1></div>
-      ${R ? `<p class="muted" style="font-size:1.1rem">${esc(R.tagline)}</p>` : ''}
+      <div class="kicker">${isWelcome ? 'Before we begin' : `Round ${kind} of 3 · ${minuteText(minutes)} · ${R.max} points`}</div>
+      <div class="round-title"><h1>${isWelcome ? 'Before you start' : `<span class="round-ico tint-${kind}" aria-hidden="true">${R.icon}</span> Round ${kind} — ${esc(R.name)}`}</h1></div>
+      ${R ? `<p style="font-size:1.2rem;font-family:var(--font-head);font-weight:800;margin-bottom:6px">${esc(R.tagline)}</p>${R.intro.map((t) => `<p class="muted" style="font-size:1.05rem">${esc(t)}</p>`).join('')}` : ''}
+      <p class="note warn" role="note"><b>⚠ Stay in this window.</b> If you leave it or switch tabs once the round starts, your test is paused and your host has to say yes before you can continue.</p>
       ${speakBtn('#rules-text', 'Read the rules aloud')}
-      <ol class="rules" style="margin-top:16px">${rules.map((r) => `<li><span>${esc(r)}</span></li>`).join('')}</ol>
+      ${isWelcome ? `${list(cfg.rules.start)}<h3 style="margin-top:20px">Play fair</h3>${list(cfg.rules.general, cfg.rules.start.length)}`
+        : `<h3 style="margin-top:16px">How to play</h3>${list(cfg.rules[kind])}`}
       ${lifelines}
     </div>
     <aside class="stack">
-      ${ph.script && !late ? narration(ph.script) : ''}
+      ${ph.script && !late ? `<div class="guide-brief">${mascot('sm')}${narration(ph.script)}</div>` : ''}
       <div class="card ${late ? '' : 'paper'}">
         <div class="muted">${sideTitle}</div>
         <div class="countdown" data-clock aria-hidden="true">0:00</div>
         ${late ? '<p class="small" style="margin-top:8px">The clock is already running — start when you’re ready.</p>' : ''}
         <div style="margin-top:14px">${acked
-          ? '<span class="chip ok">✓ Rules read — you’re ready</span>'
-          : `<button class="btn ${late ? 'lg' : ''}" data-act="ack" data-key="${ackKey}">${late ? 'I’ve read the rules — start' : 'I’ve read the rules'}</button>`}</div>
+          ? `<span class="chip ok">${isWelcome ? '✓ Rules read — you’re ready' : '✓ Ready — the round begins when the clock reaches zero'}</span>`
+          : `<label class="check warn-box"><input type="checkbox" id="warn-ok"><span class="small">I understand. If I leave this window or switch tabs, my test is paused until my host lets me back in.</span></label>
+            <button class="btn ${late ? 'lg' : ''}" id="ack-btn" data-act="ack" data-key="${ackKey}" disabled style="margin-top:12px">${late ? `Start Round ${kind}` : isWelcome ? 'I’ve read the rules' : `Start Round ${kind}`}</button>`}</div>
       </div>
     </aside></div></div>`;
 }
 
 function scoreCards(rounds, { total = null, final = false } = {}) {
-  const cell = (r) => `<div class="score-card"><div class="muted small">Round ${r.round} · ${esc(r.name)}</div>
+  const cell = (r) => `<div class="score-card tint-${r.round}"><div class="muted small">Round ${r.round} · ${esc(r.name)}</div>
     <div class="big">${r.state === 'scored' ? `${r.total}<span class="muted small">/${r.max}</span>` : r.state === 'pending' ? '<span class="small">Scoring…</span>' : '—'}</div>
     <div class="small muted">${r.state === 'scored' ? (final ? 'Final' : 'Provisional') : r.state === 'pending' ? 'Checking written answers' : 'Not played'}</div></div>`;
   return `<div class="score-cards">${rounds.map(cell).join('')}${total != null ? `<div class="score-card total"><div class="muted small">Total</div>
@@ -641,7 +749,7 @@ function transitionView(r) {
     <div><div class="kicker">Round ${r} complete</div><h1>Round ${r} is saved</h1>
       <p class="muted">Here is your provisional score. Written answers are checked by the host before results are final.</p>
       ${scoreCards([p.state.results.rounds[r - 1]])}</div>
-    <aside class="stack">${ph.script ? narration(ph.script) : ''}
+    <aside class="stack">${ph.script ? `<div class="guide-brief">${mascot('sm')}${narration(ph.script)}</div>` : ''}
       ${next ? `<div class="card paper"><div class="muted">Next up · ${next.icon} ${esc(next.name)}</div><div class="countdown" data-clock aria-hidden="true">0:00</div></div>` : ''}</aside>
   </div></div>`;
 }
@@ -719,8 +827,7 @@ function progress() {
     const done = [Object.values(d.rebuild || {}).filter(Boolean).length === 4, d.spot?.paragraph && d.spot?.why, d.match?.evidence && d.match?.why, d.repair?.text && d.repair?.why].filter(Boolean).length;
     return [`${done} of 4 puzzles done`, done * 25];
   }
-  const done = [d.prompt?.trim(), d.c1?.trim(), d.c2?.trim(), d.c3?.trim()].filter(Boolean).length;
-  return [`${done} of 4 parts written`, done * 25];
+  return d.prompt?.trim() ? ['Prompt written', 100] : ['Prompt not written yet', 0];
 }
 
 function roundView() {
@@ -761,39 +868,51 @@ function r1View() {
     </div>`;
 }
 
+const R2_PUZZLES = [['rebuild', 'Rebuild the prompt'], ['spot', 'Spot the trap'], ['match', 'Match the evidence'], ['repair', 'Repair the claim']];
+
 function r2View() {
   const v = p.content.view, d = p.draft, ll = p.content.lifelines.data;
   const blockOpts = (slot) => `<option value="">Choose a block</option>${v.blocks.map((b) => `<option value="${b.id}" ${d.rebuild?.[slot] === b.id ? 'selected' : ''}>${b.id}</option>`).join('')}`;
   const chosen = Object.values(d.rebuild || {}).filter(Boolean);
   const dupes = chosen.length !== new Set(chosen).size;
-  const puzzle = (n, key, title, inner) => `<section class="card puzzle stack" id="pz-${key}" aria-labelledby="pz-${key}-h">
-    <div class="row between"><h3 id="pz-${key}-h"><span class="n">${n}</span>${title}</h3><span class="chip">5 pts</span></div>
-    <p>${esc(v.tasks[key])}</p>${ll.unlock?.target === key ? lifelineNote(ll.unlock, 'Unlocked clue') : ''}${inner}</section>`;
   const radios = (name, field, list, label) => `<div class="pick-list" role="radiogroup" aria-label="${label}">${list.map((x) => `<label class="opt">
     <input type="radio" name="${name}" value="${x.id}" data-field="${field}" ${field.split('.').reduce((o, k) => o?.[k], d) === x.id ? 'checked' : ''}>
     <span class="tag">${esc(x.label || x.id)}</span><span class="txt">${esc(x.text)}</span></label>`).join('')}</div>`;
-  return `<div class="case">
-    <details class="card paper casefile" id="casefile" open>
-      <summary><span>Case file</span>${speakBtn('#casefile')}</summary>
-      <h2 style="margin-top:12px">${esc(v.title)}</h2><p>${esc(v.context)}</p>
-      ${lifelineNote(ll.compass, 'Case Compass')}
-      <h3>The AI’s answer</h3>
-      <div>${v.output.map((o) => `<div class="para"><span class="tag">${esc(o.label)}</span><span>${esc(o.text)}</span></div>`).join('')}</div>
-      <h3 style="margin-top:16px">Evidence cards</h3>
-      <div class="stack">${v.evidence.map((e) => `<div class="evi"><span class="tag">${esc(e.id)}</span><span>${esc(e.text)}</span></div>`).join('')}</div>
-    </details>
-    <div class="stack">
-      ${puzzle(1, 'rebuild', 'Rebuild the prompt', `<div class="blocks">${v.blocks.map((b) => `<div class="block"><span class="tag">${esc(b.id)}</span><span>${esc(b.text)}</span></div>`).join('')}</div>
-        <div class="slots">${[['goal', 'Goal'], ['audience', 'Audience'], ['include', 'Must include'], ['format', 'Format']].map(([k, l], i) => `<div class="field">
-          <label for="rb-${k}">${i + 1}. ${l}</label><select id="rb-${k}" data-field="rebuild.${k}">${blockOpts(k)}</select></div>`).join('')}</div>
-        ${dupes ? '<p class="note bad small">You used the same block twice — each block goes in one slot.</p>' : ''}`)}
-      ${puzzle(2, 'spot', 'Spot the trap', `${radios('spot', 'spot.paragraph', v.output, 'Which paragraph has the trap?')}
-        <div class="field"><label for="spot-why">Explain the problem in one sentence</label><textarea id="spot-why" data-field="spot.why" maxlength="1500">${esc(d.spot?.why || '')}</textarea></div>`)}
-      ${puzzle(3, 'match', 'Match the evidence', `${radios('match', 'match.evidence', v.evidence, 'Which evidence card?')}
-        <div class="field"><label for="match-why">How does this card help?</label><textarea id="match-why" data-field="match.why" maxlength="1500">${esc(d.match?.why || '')}</textarea></div>`)}
-      ${puzzle(4, 'repair', 'Repair the claim', `<div class="field"><label for="rep-text">Your corrected claim</label><textarea id="rep-text" data-field="repair.text" maxlength="1500">${esc(d.repair?.text || '')}</textarea></div>
-        <div class="field"><label for="rep-why">Why does your fix work?</label><textarea id="rep-why" data-field="repair.why" maxlength="1500">${esc(d.repair?.why || '')}</textarea></div>`)}
-      <div class="actionbar"><span class="muted small">Your answers save every second.</span><button class="btn" data-act="submit">Review & submit</button></div>
+  const inner = {
+    rebuild: () => `<div class="blocks">${v.blocks.map((b) => `<div class="block"><span class="tag">${esc(b.id)}</span><span>${esc(b.text)}</span></div>`).join('')}</div>
+      <div class="slots">${[['goal', 'Goal'], ['audience', 'Audience'], ['include', 'Must include'], ['format', 'Format']].map(([k, l], i) => `<div class="field">
+        <label for="rb-${k}">${i + 1}. ${l}</label><select id="rb-${k}" data-field="rebuild.${k}">${blockOpts(k)}</select></div>`).join('')}</div>
+      ${dupes ? '<p class="note bad small">You used the same block twice — each block goes in one slot.</p>' : ''}`,
+    spot: () => `${radios('spot', 'spot.paragraph', v.output, 'Which paragraph has the trap?')}
+      <div class="field"><label for="spot-why">Explain the problem in one sentence</label><textarea id="spot-why" data-field="spot.why" maxlength="1500">${esc(d.spot?.why || '')}</textarea></div>`,
+    match: () => `${radios('match', 'match.evidence', v.evidence, 'Which evidence card?')}
+      <div class="field"><label for="match-why">How does this card help?</label><textarea id="match-why" data-field="match.why" maxlength="1500">${esc(d.match?.why || '')}</textarea></div>`,
+    repair: () => `<div class="field"><label for="rep-text">Your corrected claim</label><textarea id="rep-text" data-field="repair.text" maxlength="1500">${esc(d.repair?.text || '')}</textarea></div>
+      <div class="field"><label for="rep-why">Why does your fix work?</label><textarea id="rep-why" data-field="repair.why" maxlength="1500">${esc(d.repair?.why || '')}</textarea></div>`,
+  };
+  const started = { rebuild: chosen.length, spot: d.spot?.paragraph || d.spot?.why, match: d.match?.evidence || d.match?.why, repair: d.repair?.text || d.repair?.why };
+  const i = Math.min(Math.max(p.qi, 0), R2_PUZZLES.length - 1), [key, title] = R2_PUZZLES[i], last = i === R2_PUZZLES.length - 1;
+  // One screen, no scrolling: the case sits on the left (answer + evidence), one puzzle at a time on the right.
+  return `<div class="case2">
+    <div class="c2-head"><b id="case-title">${esc(v.title)}</b> <span class="muted">${esc(v.context)}</span>${speakBtn('#case-all')}</div>
+    ${lifelineNote(ll.compass, 'Case Compass')}
+    <div class="c2-cols" id="case-all">
+      <section class="card paper c2-col" aria-label="The AI’s answer"><h3>The AI’s answer</h3>
+        ${v.output.map((o) => `<div class="para"><span class="tag">${esc(o.label)}</span><span>${esc(o.text)}</span></div>`).join('')}</section>
+      <section class="card paper c2-col" aria-label="Evidence cards"><h3>Evidence cards</h3>
+        <div class="stack">${v.evidence.map((e) => `<div class="evi"><span class="tag">${esc(e.id)}</span><span>${esc(e.text)}</span></div>`).join('')}</div></section>
+      <section class="c2-work">
+        <nav class="qnav" aria-label="Puzzles">${R2_PUZZLES.map(([k, t], n) => `<button data-act="goto" data-i="${n}" class="${started[k] ? 'done' : ''}" ${n === i ? 'aria-current="step"' : ''}
+          aria-label="Puzzle ${n + 1}: ${t}${started[k] ? ', started' : ''}">${n + 1}</button>`).join('')}</nav>
+        <div class="card puzzle stack" id="pz-${key}" aria-labelledby="pz-h">
+          <div class="row between"><h3 id="pz-h"><span class="n">${i + 1}</span>${title}</h3><span class="chip">Puzzle ${i + 1} of 4 · 5 pts</span></div>
+          <p>${esc(v.tasks[key])}</p>${ll.unlock?.target === key ? lifelineNote(ll.unlock, 'Unlocked clue') : ''}${inner[key]()}
+        </div>
+        <div class="actionbar">
+          <button class="btn ghost" data-act="goto" data-i="${i - 1}" ${i === 0 ? 'disabled' : ''}>← Back</button>
+          ${last ? '<button class="btn" data-act="submit">Review & submit</button>' : `<button class="btn" data-act="goto" data-i="${i + 1}">Next →</button>`}
+        </div>
+      </section>
     </div></div>`;
 }
 
@@ -815,11 +934,6 @@ function targetHTML(lines) {
   return out;
 }
 
-const CONNECTION_HINTS = [
-  { hint: 'Audience or purpose: who is the target for, and how did your prompt show that?', eg: 'I said “for Grade 6 students” because the target speaks to young readers.' },
-  { hint: 'Content: pick one thing in the target and point to the words in your prompt that ask for it.', eg: 'The target lists three tips, so I wrote “give three short tips”.' },
-  { hint: 'Layout or tone: how did your prompt ask for the same look, order or voice?', eg: 'I asked for a heading and bullet points to match the target’s layout.' }];
-
 function r3View() {
   const c = p.content, v = c.view, d = p.draft, ll = c.lifelines.data;
   const gens = c.generations || [], image = v.image;
@@ -835,17 +949,14 @@ function r3View() {
     <div class="stack">
       <section class="card stack">
         <div class="field"><label for="r3-prompt">Your prompt</label><span class="hint">Say what to make, who it is for, what it must include and how it should be laid out.</span>
-          <textarea id="r3-prompt" data-field="prompt" data-nopaste rows="6" maxlength="3000" placeholder="For example: Write a short, friendly notice for Grade 6 students about…">${esc(d.prompt || '')}</textarea></div>
-        ${image ? '<p class="note small">This target is a picture, so there is no AI tool here. Describe what you see in your prompt, then explain three choices below.</p>' : cfg.aiTool ? `<div class="row between"><span class="muted small">${c.generationsLeft} of ${cfg.generations} AI tries left</span>
+          <textarea id="r3-prompt" data-field="prompt" data-nopaste rows="8" maxlength="3000" placeholder="For example: Write a short, friendly notice for Grade 6 students about…">${esc(d.prompt || '')}</textarea>
+          <span class="hint">Typing only — copy and paste are switched off in this round.</span></div>
+        ${image ? '<p class="note small">This target is a picture, so there is no AI tool here. Describe what you see in your prompt.</p>' : cfg.aiTool ? `<div class="row between"><span class="muted small">${c.generationsLeft} of ${cfg.generations} AI tries left</span>
           <button class="btn ghost" data-act="generate" ${c.generationsLeft <= 0 ? 'disabled' : ''}>Try my prompt with AI</button></div>`
-          : '<p class="note small">The AI tool isn’t switched on for this event — write your best prompt and your three connections.</p>'}
+          : '<p class="note small">The AI tool isn’t switched on for this event — write your best prompt.</p>'}
         ${gens.map((g, i) => { const on = String(d.finalPick) === String(i); return `<div class="gen ${on ? 'chosen' : ''}"><div class="gen-head"><span>AI try ${i + 1}</span>
           <button class="btn ${on ? '' : 'ghost'} sm" data-act="pick-gen" data-i="${i}" aria-pressed="${on}">${on ? '✓ Chosen as my final creation' : 'Choose as my final creation'}</button></div>${esc(g.output)}</div>`; }).join('')}
         ${gens.length ? '<p class="small muted" style="margin:0">Your final creation is one of the AI results above. It can’t be typed, pasted or edited.</p>' : ''}
-      </section>
-      <section class="card stack"><h3>Explain your choices</h3><p class="muted small" style="margin:0">Three short connections: which part of your prompt matches which part of the target?</p>
-        ${CONNECTION_HINTS.map((h, n) => `<div class="field"><label for="r3-c${n + 1}">Connection ${n + 1}</label><span class="hint" id="r3-h${n + 1}">${h.hint}</span><input id="r3-c${n + 1}" type="text" data-field="c${n + 1}" data-nopaste maxlength="400" aria-describedby="r3-h${n + 1}" placeholder="${h.eg}" value="${esc(d[`c${n + 1}`] || '')}"></div>`).join('')}
-        <p class="small muted" style="margin:0">Typing only — copy and paste are switched off for Round 3.</p>
       </section>
       <div class="actionbar"><span class="muted small">Your answers save every second.</span><button class="btn" data-act="submit">Review & submit</button></div>
     </div></div>`;
@@ -905,11 +1016,23 @@ const actions = {
     location.hash = '#/';
     route();
   },
+  'cookie-ok': () => { store.set('pt-cookie-notice', '1'); $('#cookie-bar')?.remove(); },
+  'lock-request': async () => {
+    try { applyState(await api('/api/play/lock-request', { note: $('#lock-note')?.value || '' })); } catch (err) { toast(err.message); }
+  },
+  'add-phone': (el) => {
+    const box = $('#ns-phones'), n = box.querySelectorAll('input').length;
+    if (n >= 5) { toast('You can add up to 5 phone numbers.'); return; }
+    box.insertAdjacentHTML('beforeend', phoneInput(n + 1));
+    box.lastElementChild.focus();
+    if (n + 1 >= 5) el.hidden = true;
+  },
   pick: async (el) => {
     try {
       await api('/api/students/select', { studentId: el.dataset.id });
       me = await api('/api/me');
-      location.hash = '#/play';
+      const chosen = me.students.find((x) => x.id === me.studentId);
+      location.hash = ['new', 'waiting', 'away'].includes(chosen?.status) ? '#/welcome' : '#/play'; // a test already under way skips the welcome
     } catch (err) { toast(err.message); }
   },
   release: async () => {
@@ -936,7 +1059,7 @@ const actions = {
     } catch (err) { toast(err.message); }
   },
   goto: (el) => {
-    const i = Number(el.dataset.i), n = p.content.view.items.length + 1;
+    const i = Number(el.dataset.i), n = p.content.round === 2 ? R2_PUZZLES.length : p.content.view.items.length + 1;
     if (i < 0 || i >= n) return;
     p.qi = i;
     speech.stop();
@@ -953,7 +1076,7 @@ const actions = {
     }
     if (c.round === 2 && l.id === 'unlock') {
       body += `<div class="field"><label for="ll-target">Which puzzle?</label><select id="ll-target">
-        <option value="rebuild">1. Rebuild the prompt</option><option value="spot">2. Spot the trap</option><option value="match">3. Match the evidence</option><option value="repair">4. Repair the claim</option></select></div>`;
+        ${R2_PUZZLES.map(([k, t], i) => `<option value="${k}" ${i === p.qi ? 'selected' : ''}>${i + 1}. ${t}</option>`).join('')}</select></div>`;
     }
     body += `<p class="muted small">${cfg.lifelinesPerRound === 1 ? 'You can use only one lifeline in this round.' : 'Each lifeline can be used once in this round.'}</p>`;
     if (await dialog({ title: `Use ${l.name}?`, body, actions: [{ label: 'Not now', value: 'no', kind: 'ghost' }, { label: `Use ${l.name}`, value: 'yes' }] }) !== 'yes') return;
@@ -1032,13 +1155,68 @@ document.addEventListener('click', (e) => {
   if (fn) { e.preventDefault(); fn(el); }
 });
 
+document.addEventListener('change', (e) => { if (e.target.id === 'warn-ok') $('#ack-btn').disabled = !e.target.checked; });
+
 window.addEventListener('hashchange', route);
+
+// ---------------------------------------------------------------- test guard
+// While a test is live: no copying, cutting, pasting, dragging, printing or right-click menus, the page hides itself when the window
+// loses focus or a screenshot key is pressed, and leaving the window during a round pauses the clock until the host lets the student back in.
+// A browser cannot stop a screenshot taken by the operating system or another device; these are deterrents, and every page carries the student's code.
+const guarding = () => document.documentElement.classList.contains('guard');
+for (const t of ['copy', 'cut', 'paste', 'drop', 'dragstart', 'contextmenu']) document.addEventListener(t, (e) => {
+  if (!guarding()) return;
+  e.preventDefault();
+  if (t === 'paste' || t === 'drop') toast('Pasting is switched off during the test — please type your answer.');
+}, true);
+let shieldTimer;
+const shield = () => { document.documentElement.classList.add('shield'); clearTimeout(shieldTimer); shieldTimer = setTimeout(() => document.documentElement.classList.remove('shield'), 2500); };
+const guardKey = (e) => {
+  if (!guarding()) return;
+  const k = e.key.toLowerCase(), mod = e.ctrlKey || e.metaKey;
+  if (e.key === 'PrintScreen' || (e.metaKey && e.shiftKey && ['3', '4', '5'].includes(e.key)) || (e.metaKey && e.shiftKey && ['3', '4', '5'].includes(e.code?.slice(-1)))) {
+    shield(); navigator.clipboard?.writeText('').catch(() => {}); e.preventDefault();
+  } else if (e.type === 'keydown' && ((mod && ['c', 'x', 'v', 'p', 's', 'u'].includes(k)) || (mod && k === 'a' && !e.target.closest?.('input, textarea')) || (e.shiftKey && e.key === 'Insert')
+    || e.key === 'F12' || (mod && e.shiftKey && ['i', 'j', 'c'].includes(k)))) e.preventDefault();
+};
+document.addEventListener('keydown', guardKey, true);
+document.addEventListener('keyup', guardKey, true);
+let leaveTimer;
+async function checkLeave() {
+  const st = p.state;
+  if (!p.active || p.leaving || st?.status !== 'running' || st.phase?.type !== 'round' || st.round?.submitted || (!document.hidden && document.hasFocus())) return;
+  p.leaving = true;
+  try { applyState(await api('/api/play/leave', { deviceId: p.device })); } catch { /* the next sync will show the real state */ } finally { p.leaving = false; }
+}
+document.addEventListener('visibilitychange', () => { clearTimeout(leaveTimer); if (document.hidden) leaveTimer = setTimeout(checkLeave, 300); });
+addEventListener('blur', () => { if (guarding()) document.documentElement.classList.add('shield'); clearTimeout(leaveTimer); leaveTimer = setTimeout(checkLeave, 700); });
+addEventListener('focus', () => document.documentElement.classList.remove('shield'));
+// A faint tiled watermark with the student's code on every screen of a live test.
+function watermark(code) {
+  let w = $('#wm');
+  if (!code) { w?.remove(); return; }
+  if (!w) { w = document.createElement('div'); w.id = 'wm'; w.setAttribute('aria-hidden', 'true'); document.body.append(w); }
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="260" height="170"><text x="20" y="100" transform="rotate(-24 130 85)" font-family="sans-serif" font-size="20" font-weight="700" fill="#000">${esc(code)}</text></svg>`;
+  w.style.backgroundImage = `url("data:image/svg+xml,${encodeURIComponent(svg)}")`;
+}
+
+// ---------------------------------------------------------------- cookie notice
+// Promptathon sets only the cookie that keeps you signed in, so this is a notice with one button, not a choice between trackers.
+function cookieNotice() {
+  if (store.get('pt-cookie-notice') || $('#cookie-bar')) return;
+  const bar = document.createElement('div');
+  bar.id = 'cookie-bar'; bar.className = 'cookie-bar'; bar.setAttribute('role', 'region'); bar.setAttribute('aria-label', 'Cookie notice');
+  bar.innerHTML = `<p>🍪 We only use one small cookie to keep you signed in, and your browser remembers your reading settings. No ads, no tracking. <a href="#/legal/cookies">Cookie policy</a> · <a href="#/legal/privacy">Privacy policy</a></p>
+    <button class="btn sm" data-act="cookie-ok">Got it</button>`;
+  document.body.append(bar);
+}
 
 // ---------------------------------------------------------------- boot
 applyPrefs();
 try {
   [cfg, me] = await Promise.all([api('/api/config'), api('/api/me')]);
   route();
+  cookieNotice();
 } catch {
   main.innerHTML = '<div class="wrap"><p class="note bad" style="margin-top:32px">Promptathon can’t reach the server right now. Please refresh in a moment.</p></div>';
 }
