@@ -186,6 +186,23 @@ export const SKILLS = {
   S11: { name: 'Managing Uncertainty & Verification', about: 'Recognises missing information and decides what to check.', tip: 'Practise noticing what information is missing and what to check.' },
 };
 
+// The names and one-line meanings printed on the score card (same 11 skills as above, in the card's wording).
+export const SKILL_CARD = {
+  S01: ['Clear Prompts, Better Results', 'I give clear instructions so AI understands my goal.'],
+  S02: ['Plan Before You Prompt', 'I work out my goal, audience and requirements.'],
+  S03: ['Ideas in Order', 'I organise ideas so they are easy to follow.'],
+  S04: ['Check It, Don’t Just Trust It', 'I spot mistakes and claims that need checking.'],
+  S05: ['Find the Proof', 'I use evidence to support or challenge an answer.'],
+  S06: ['Spot It. Fix It.', 'I identify a problem and suggest a useful improvement.'],
+  S07: ['Explain Your Thinking', 'I explain my choices with clear reasons.'],
+  S08: ['Keep Private Things Private', 'I recognise personal information and protect it.'],
+  S09: ['You’re in Charge', 'AI suggests. I decide what to accept, change or reject.'],
+  S10: ['Make It Fair for Everyone', 'I spot unfair treatment and suggest inclusive choices.'],
+  S11: ['Know When to Check More', 'I recognise missing information and decide what to check.'],
+};
+// Skill percentages on the card run from 20 to 100 (a raw 0–100% is shown as 20 + 0.8 × raw).
+export const SKILL_PERCENT_FLOOR = 20;
+
 export const R3_GENERATIONS = 2;
 export const AI_CONCURRENCY = 4;
 

@@ -5,88 +5,110 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{student_name}} · Score card</title>
 <!--
-  Default score card. Replace this file with your own design (HTML + CSS) and keep the {{placeholders}}.
-  Single values: {{student_name}} {{grade}} {{player_code}} {{school}} {{band}} {{event}} {{status}} {{total}}
+  Score card (A4). Replace this file with your own design (HTML + CSS) and keep the {{placeholders}}.
+  Single values: {{student_name}} {{grade}} {{grade_number}} {{player_code}} {{school}} {{band}} {{event}} {{status}} {{total}}
                  {{round1}} {{round2}} {{round3}} {{strength}} {{next_step}} {{date}} {{logo_url}}
-  Repeat one row per skill:  {{#skills}} … {{/skills}}  using {{id}} {{name}} {{about}} {{percent}} {{bar}} {{evidence}}
+  Repeat one row per skill:  {{#skills}} … {{/skills}}  using {{id}} {{name}} {{about}} {{percent}} {{percent_text}} {{bar}} {{evidence}}
   ({{bar}} is 0–100, handy for a bar's width).
+  Every file in templates/scorecard-assets/ is available as {{asset_<file name without extension>}} (embedded, so PDFs and emails keep it).
 -->
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&display=swap">
 <style>
-  :root { --ink: #1d1a17; --muted: #5d554e; --line: #eee1d5; --accent: #e8682a; --soft: #fff6ee; }
+  :root { --ink: #1d1a17; --muted: #5d554e; --line: #ecdfd2; --accent: #f58220; --red: #e8472b; --yellow: #fdb827; --peach: #fdebd3; --track: #eadfd3; }
   * { box-sizing: border-box; }
-  body { margin: 0; background: #f4efe9; color: var(--ink); font: 16px/1.45 system-ui, -apple-system, 'Segoe UI', sans-serif; }
-  .card { width: 210mm; min-height: 297mm; margin: 16px auto; background: #fff; padding: 14mm; border: 1px solid var(--line); }
-  header { display: flex; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 3px solid var(--accent); padding-bottom: 10px; }
-  header img { height: 54px; }
-  h1 { margin: 0; font-size: 26px; }
-  .sub { color: var(--muted); margin: 4px 0 0; }
-  .status { font-size: 12px; font-weight: 700; background: var(--soft); border: 1px solid var(--accent); border-radius: 99px; padding: 3px 10px; white-space: nowrap; }
-  .who { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 16px 0; }
-  .who div, .tiles div { border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; }
-  .who small, .tiles small { display: block; color: var(--muted); font-size: 12px; }
-  .who b { font-size: 16px; }
-  .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 16px; }
-  .tiles b { font-size: 28px; } .tiles span { color: var(--muted); font-size: 14px; }
-  .tiles .total { background: var(--soft); border-color: var(--accent); }
-  h2 { font-size: 18px; margin: 0 0 8px; }
-  table { width: 100%; border-collapse: collapse; }
-  th { text-align: left; font-size: 12px; text-transform: uppercase; color: var(--muted); padding: 6px 8px; border-bottom: 2px solid var(--line); }
-  td { padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }
-  td small { color: var(--muted); display: block; font-size: 12px; }
-  .pct { width: 56px; font-weight: 700; text-align: right; }
-  .bar { width: 38%; } .bar i { display: block; height: 10px; border-radius: 5px; background: var(--accent); }
-  .bar { background: linear-gradient(var(--line), var(--line)) center / 100% 10px no-repeat; }
-  .notes { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 16px; }
-  .notes div { border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; background: var(--soft); }
-  .notes b { display: block; margin-bottom: 4px; color: var(--accent); }
-  footer { margin-top: 14px; font-size: 12px; color: var(--muted); display: flex; justify-content: space-between; gap: 12px; }
+  body { margin: 0; background: #f4efe9; color: var(--ink); font: 15px/1.35 'Nunito', system-ui, -apple-system, 'Segoe UI', sans-serif; }
+  .card { position: relative; width: 210mm; height: 297mm; margin: 16px auto; background: #fff; padding: 9mm 13mm 6mm; overflow: hidden; display: flex; flex-direction: column; }
+  .topbar { position: absolute; inset: 0 0 auto 0; height: 2mm; background: linear-gradient(90deg, var(--red) 0 33.3%, var(--accent) 33.3% 66.6%, var(--yellow) 66.6%); }
+  header { display: flex; align-items: center; gap: 6mm; padding-bottom: 3mm; border-bottom: 2px solid var(--ink); }
+  header img { height: 17mm; padding-right: 6mm; border-right: 1px solid var(--line); }
+  .kicker { margin: 0; font-size: 11px; font-weight: 800; letter-spacing: .2em; color: var(--red); text-transform: uppercase; }
+  h1 { margin: 0; font-size: 34px; line-height: 1.1; font-weight: 900; }
+  h1 span { color: var(--red); }
+  .tag { margin: 2px 0 0; color: var(--muted); font-size: 14px; }
+  .who { display: grid; grid-template-columns: 1.25fr .5fr 1.25fr 1fr; gap: 6mm; padding: 3mm 0; border-bottom: 1px solid var(--line); }
+  .who small { display: block; font-size: 11px; font-weight: 800; letter-spacing: .16em; text-transform: uppercase; color: var(--muted); }
+  .who b { font-size: 20px; font-weight: 800; line-height: 1.2; }
+  .scores { display: grid; grid-template-columns: 1.3fr 1fr 1fr 1fr; border-bottom: 1px solid var(--line); margin-bottom: 3mm; }
+  .scores > div { padding: 2mm 4mm; border-left: 1px solid var(--line); }
+  .scores > div:first-child { border-left: 0; }
+  .scores small { display: block; font-weight: 800; font-size: 14px; }
+  .scores b { font-size: 34px; font-weight: 900; line-height: 1.15; } .scores span { font-size: 22px; font-weight: 700; color: var(--muted); }
+  .scores .total { background: var(--peach); position: relative; }
+  .scores .total small { font-size: 12px; letter-spacing: .16em; text-transform: uppercase; }
+  .scores .total b { font-size: 48px; line-height: 1; } .scores .total span { font-size: 22px; }
+  .scores .total img { position: absolute; right: 2mm; bottom: 2mm; height: 17mm; }
+  .skills { border: 1px solid var(--line); border-top: 0; }
+  .skills-head { display: flex; justify-content: space-between; background: var(--ink); color: #fff; font-weight: 800; font-size: 14px; padding: 2.4mm 4mm; }
+  .skills-head span:last-child { margin-right: 20mm; }
+  .skill { display: grid; grid-template-columns: 1fr 30% 16mm; align-items: center; gap: 4mm; padding: 1.6mm 4mm; border-top: 1px solid var(--line); }
+  .skill:first-of-type { border-top: 0; }
+  .skill b { display: block; font-size: 15px; font-weight: 800; line-height: 1.2; }
+  .skill small { display: block; color: var(--muted); font-size: 12px; line-height: 1.2; }
+  .bar { height: 8px; border-radius: 4px; background: var(--track); } .bar i { display: block; height: 100%; border-radius: 4px; background: var(--accent); }
+  .pct { text-align: right; font-size: 19px; font-weight: 900; }
+  .notes { display: grid; grid-template-columns: 1fr 1fr; gap: 8mm; margin-top: 4mm; }
+  .notes > div { display: grid; grid-template-columns: 11mm 1fr; column-gap: 3mm; border-top: 3px solid var(--accent); padding-top: 2.5mm; }
+  .notes > div + div { border-top-color: var(--ink); }
+  .notes img { width: 10mm; margin-top: 1mm; }
+  .notes h2 { margin: 0; font-size: 18px; font-weight: 900; } .notes p { margin: 0; font-size: 14px; line-height: 1.3; }
+  .motto { margin: 3mm 0 0; display: flex; align-items: center; gap: 6mm; font-weight: 800; font-size: 16px; }
+  .motto::before, .motto::after { content: ''; flex: 1; border-top: 1px solid var(--line); }
+  .signs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8mm; margin-top: auto; padding-top: 2mm; text-align: left; }
+  .signs figure { margin: 0; } .signs .ink { height: 13mm; display: flex; align-items: flex-end; border-bottom: 2px solid var(--ink); }
+  .signs img { max-height: 12mm; max-width: 100%; }
+  .signs b { display: block; margin-top: 1mm; font-size: 16px; font-weight: 900; } .signs span { color: var(--muted); font-size: 14px; }
+  footer { margin-top: 2mm; text-align: center; font-size: 12px; color: var(--muted); }
+  .status { margin-left: auto; font-size: 11px; font-weight: 800; border: 1px solid var(--accent); background: var(--peach); border-radius: 99px; padding: 2px 10px; white-space: nowrap; }
   @media print {
     body { background: #fff; }
-    .card { margin: 0; border: 0; width: 210mm; height: 296mm; min-height: 0; padding: 10mm 12mm; overflow: hidden; }
-    td { padding: 5px 8px; } .who, .tiles { margin: 10px 0; } h1 { font-size: 24px; }
+    .card { margin: 0; }
     @page { size: A4; margin: 0; }
   }
 </style>
 </head>
 <body>
 <main class="card">
+  <div class="topbar"></div>
   <header>
-    <div><h1>My AI Readiness &amp; Thinking Skills</h1><p class="sub">A snapshot of how I communicate, reason, solve problems and make responsible decisions with AI.</p></div>
-    <div style="text-align:right"><img src="{{logo_url}}" alt="The AI Club"><div class="status">{{status}}</div></div>
+    <img src="{{logo_url}}" alt="The AI Club">
+    <div><p class="kicker">National Promptathon Challenge</p><h1>My AI Skills in <span>Action</span></h1><p class="tag">How I think, check, create and make smart choices with AI.</p></div>
+    <div class="status">{{status}}</div>
   </header>
 
   <section class="who">
-    <div><small>Student name</small><b>{{student_name}}</b></div>
-    <div><small>Grade</small><b>{{grade}}</b></div>
-    <div><small>Player code</small><b>{{player_code}}</b></div>
+    <div><small>Student</small><b>{{student_name}}</b></div>
+    <div><small>Grade</small><b>{{grade_number}}</b></div>
     <div><small>School</small><b>{{school}}</b></div>
+    <div><small>Date</small><b>{{date}}</b></div>
   </section>
 
-  <section class="tiles">
-    <div class="total"><small>Total</small><b>{{total}}</b><span>/60</span></div>
+  <section class="scores">
+    <div class="total"><small>Total score</small><b>{{total}}</b><span>/60</span><img src="{{asset_mascot}}" alt=""></div>
     <div><small>AI Blitz</small><b>{{round1}}</b><span>/20</span></div>
     <div><small>Crack the AI Case</small><b>{{round2}}</b><span>/20</span></div>
-    <div><small>Creator Showdown</small><b>{{round3}}</b><span>/20</span></div>
+    <div><small>Match the Output</small><b>{{round3}}</b><span>/20</span></div>
   </section>
 
-  <h2>Skills demonstrated in this challenge</h2>
-  <table>
-    <thead><tr><th>Skill &amp; what it means</th><th class="pct">%</th><th>Skill score</th></tr></thead>
-    <tbody>
-    {{#skills}}<tr><td><b>{{name}}</b><small>{{about}}</small></td><td class="pct">{{percent}}</td><td class="bar"><i style="width:{{bar}}%"></i></td></tr>
+  <section class="skills">
+    <div class="skills-head"><span>My Skills in Action</span><span>My Challenge Score</span></div>
+    {{#skills}}<div class="skill"><div><b>{{name}}</b><small>{{about}}</small></div><div class="bar"><i style="width:{{bar}}%"></i></div><div class="pct">{{percent_text}}</div></div>
     {{/skills}}
-    </tbody>
-  </table>
+  </section>
 
   <section class="notes">
-    <div><b>My strength</b>{{strength}}</div>
-    <div><b>My next step</b>{{next_step}}</div>
+    <div><img src="{{asset_icon1}}" alt=""><div><h2>My Standout Skill</h2><p>{{strength}}</p></div></div>
+    <div><img src="{{asset_icon2}}" alt=""><div><h2>My Next Power-Up</h2><p>{{next_step}}</p></div></div>
   </section>
 
-  <footer>
-    <span>Skill scores describe this challenge only and do not add up to the total score.</span>
-    <span>{{event}} · {{date}}</span>
-  </footer>
+  <p class="motto">Keep asking. Keep checking. Keep creating.</p>
+
+  <section class="signs">
+    <figure><div class="ink"><img src="{{asset_sig1}}" alt=""></div><b>Krishnakanth JSS</b><span>Co-Founder</span></figure>
+    <figure><div class="ink"><img src="{{asset_sig2}}" alt=""></div><b>Neelakantha Bhanu</b><span>Founder &amp; CEO</span></figure>
+    <figure><div class="ink"><img src="{{asset_sig3}}" alt=""></div><b>Sulbha Shantwana</b><span>Director of Academics</span></figure>
+  </section>
+
+  <footer>These scores show challenge performance. Every skill can grow with practice.</footer>
 </main>
 </body>
 </html>

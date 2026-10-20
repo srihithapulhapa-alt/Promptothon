@@ -424,7 +424,7 @@ function deviceId() {
 }
 
 async function playPage() {
-  Object.assign(p, { active: true, state: null, content: null, draft: {}, ver: 0, ackVer: 0, lastKey: '', conflict: false, busy: false,
+  Object.assign(p, { active: true, rulesSeen: '', state: null, content: null, draft: {}, ver: 0, ackVer: 0, lastKey: '', conflict: false, busy: false,
     qi: 0, sawBrief: {}, offline: false, savedAt: null, saveError: '', announced: {}, preflight: { sound: false, save: false, tools: false } });
   p.device = deviceId();
   main.innerHTML = '<div class="wrap"><p class="page-head">Loading your test…</p></div>';
@@ -700,8 +700,10 @@ function rulesView(kind, late = false) {
     <p class="muted">${esc(R.lifelineNote)} They cost no points and never add time.</p>
     <p><b>Time:</b> ${minuteText(minutes)} · <b>Points:</b> ${esc(R.points)}</p>
     <div class="guide-says">${mascot('sm')}<p class="guide-say">Foldling says: ${esc(R.says)}</p></div>` : '';
+  const again = p.rulesSeen === `${kind}${late}`; // redrawn after the click (or a sync): show it as it was, don't replay the entrance
+  p.rulesSeen = `${kind}${late}`;
   const sideTitle = late ? `Round ${kind} is running` : isWelcome ? 'Round 1 briefing in' : `Round ${kind} starts in`;
-  return `<div class="wrap"><div class="brief">
+  return `<div class="wrap"><div class="brief ${again ? 'still' : ''}">
     <div id="rules-text" class="measure">
       <div class="kicker">${isWelcome ? 'Before we begin' : `Round ${kind} of 3 · ${minuteText(minutes)} · ${R.max} points`}</div>
       <div class="round-title"><h1>${isWelcome ? 'Before you start' : `<span class="round-ico tint-${kind}" aria-hidden="true">${R.icon}</span> Round ${kind} — ${esc(R.name)}`}</h1></div>

@@ -432,6 +432,7 @@ html[data-theme='orange'] .page-head.center h1::after { margin-inline: auto; }
 .page-head, .home, .welcome, .brief > *, .two > *, .score-cards, .round-cards li, .pills li { animation: rise .45s ease both; }
 .grid-cards > *, ol.rules li, .round-cards li, .pills li { animation: rise .45s ease both; animation-delay: calc(var(--i, 0) * 120ms + 100ms); }
 ol.rules li { animation-delay: calc(var(--i, 0) * 450ms + 250ms); } /* the rules appear one by one, at reading pace */
+.brief.still, .brief.still * { animation: none !important; } /* the briefing is shown once; a redraw must not replay it */
 .round-cards li:nth-child(2), .pills li:nth-child(2) { --i: 1; }
 .round-cards li:nth-child(3), .pills li:nth-child(3) { --i: 2; }
 .puzzle, .qcard#q-card { animation: rise .3s ease both; }

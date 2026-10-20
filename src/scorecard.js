@@ -5,9 +5,10 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { db } from './store.js';
-import { SCORE_PARTS, EVENT_NAME, SCORECARD_TEMPLATE, bandOf } from './config.js';
+import { SCORE_PARTS, EVENT_NAME, SCORECARD_TEMPLATE, SKILL_CARD, SKILL_PERCENT_FLOOR, bandOf } from './config.js';
 import { getSkills } from './bank.js';
 
+const ASSETS = new URL('../templates/scorecard-assets/', import.meta.url);
 const R2_PARTS = { rebuild: ['rebuild'], spot: ['spotId', 'spotWhy'], match: ['matchId', 'matchWhy'], repair: ['repairFix', 'repairWhy'] };
 const maxOf = (round, key) => SCORE_PARTS[round].find((p) => p.key === key).max;
 const sum = (rec) => Object.values(rec.score.parts).reduce((t, p) => t + (p.points || 0), 0);
@@ -51,7 +52,9 @@ export function baseCard(a) {
   const info = getSkills();
   const skills = Object.keys(info).sort().map((id) => {
     const s = agg[id];
-    return { id, name: info[id].name, about: info[id].about, percent: s?.available ? Math.round((100 * s.earned) / s.available) : null, evidence: s?.tasks.size || 0 };
+    const [name, about] = SKILL_CARD[id] || [info[id].name, info[id].about];
+    const raw = s?.available ? s.earned / s.available : null; // 0–1
+    return { id, name, about, percent: raw == null ? null : Math.round(SKILL_PERCENT_FLOOR + raw * (100 - SKILL_PERCENT_FLOOR)), evidence: s?.tasks.size || 0 };
   });
   const rounds = [1, 2, 3].map((r) => (a.rounds?.[r]?.score ? sum(a.rounds[r]) : null));
   const awaiting = pending || [1, 2, 3].some((r) => a.rounds?.[r]?.score?.pending);
@@ -95,17 +98,19 @@ const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 const fill = (text, values) => text.replace(/\{\{(\w+)\}\}/g, (_, k) => esc(values[k] ?? ''));
 
 // Placeholders: {{student_name}} {{grade}} {{player_code}} {{school}} {{band}} {{event}} {{status}} {{total}} {{round1}} {{round2}}
-// {{round3}} {{strength}} {{next_step}} {{date}} {{logo_url}}, and a repeated block {{#skills}} … {{/skills}} that may use
-// {{id}} {{name}} {{about}} {{percent}} {{bar}} {{evidence}}. The file is read on every request, so edits show immediately.
+// {{round3}} {{strength}} {{next_step}} {{date}} {{logo_url}} {{grade_number}}, a repeated block {{#skills}} … {{/skills}} that may use
+// {{id}} {{name}} {{about}} {{percent}} {{percent_text}} {{bar}} {{evidence}}, and every picture in templates/scorecard-assets/ as
+// {{asset_<name>}} (embedded as data, so PDFs keep it). The file is read on every request, so edits show immediately.
 export function renderScorecard(card, { logo = '/the-ai-club-logo.png' } = {}) {
   const template = fs.readFileSync(new URL(`../${SCORECARD_TEMPLATE}`, import.meta.url), 'utf8'); // relative to the project, not the working folder
   const dash = (v) => (v == null ? '—' : v);
+  const assets = Object.fromEntries(fs.readdirSync(ASSETS).map((f) => [`asset_${f.replace(/\.[^.]+$/, '')}`, `data:image/png;base64,${fs.readFileSync(new URL(f, ASSETS)).toString('base64')}`]));
   const values = {
-    student_name: card.name, grade: /^\d+$/.test(String(card.grade)) ? `Grade ${card.grade}` : card.grade, player_code: card.code, school: card.school, band: card.band, event: card.event,
+    ...assets, grade_number: card.grade, student_name: card.name, grade: /^\d+$/.test(String(card.grade)) ? `Grade ${card.grade}` : card.grade, player_code: card.code, school: card.school, band: card.band, event: card.event,
     status: { final: 'Final results', provisional: 'Provisional results', pending: 'Scoring in progress' }[card.status],
     total: card.total, round1: dash(card.rounds[0]), round2: dash(card.rounds[1]), round3: dash(card.rounds[2]),
-    strength: card.strength, next_step: card.nextStep, date: new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' }), logo_url: logo,
+    strength: card.strength, next_step: card.nextStep, date: new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }), logo_url: logo,
   };
   return fill(template.replace(/\{\{#skills\}\}([\s\S]*?)\{\{\/skills\}\}/g, (_, inner) => card.skills
-    .map((s) => fill(inner, { ...s, percent: s.percent == null ? '—' : s.percent, bar: s.percent ?? 0 })).join('')), values);
+    .map((s) => fill(inner, { ...s, percent: s.percent == null ? '—' : s.percent, percent_text: s.percent == null ? '—' : `${s.percent}%`, bar: s.percent ?? 0 })).join('')), values);
 }
