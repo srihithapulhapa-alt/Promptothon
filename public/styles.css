@@ -94,9 +94,8 @@ main { flex: 1; outline: none; padding-bottom: 32px; }
 .btn[disabled], .btn[aria-disabled='true'] { opacity: .45; cursor: not-allowed; }
 .icon-btn { border: 0; background: transparent; font: inherit; font-size: 1.1rem; width: 40px; height: 40px; border-radius: 8px; cursor: pointer; color: var(--ink); }
 .icon-btn:hover { background: var(--paper); }
-.speak { border: 1.5px solid var(--line-strong); background: var(--surface); color: var(--ink); border-radius: 999px; padding: 4px 12px; font: inherit; font-size: .85rem; font-weight: 700; cursor: pointer; display: none; align-items: center; gap: 6px; }
+.speak { border: 1.5px solid var(--line-strong); background: var(--surface); color: var(--ink); border-radius: 999px; padding: 4px 12px; font: inherit; font-size: .85rem; font-weight: 700; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
 .speak[aria-pressed='true'] { background: var(--soft); border-color: var(--btn); }
-html.a11y .speak { display: inline-flex; }
 
 label { font-weight: 700; }
 .field { display: flex; flex-direction: column; gap: 6px; }

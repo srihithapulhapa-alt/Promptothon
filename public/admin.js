@@ -395,7 +395,7 @@ function setup() {
             <button type="button" class="btn ghost sm" data-admin="round-time" data-round="${r}" data-action="extend">Add time</button>
             <button type="button" class="btn ghost sm" data-admin="round-time" data-round="${r}" data-action="end">End now</button></div>`; }).join('')}
         <h3 style="margin:6px 0 0">Between rounds <span class="muted small" style="font-weight:400">seconds</span></h3>
-        ${[['welcome', 'Welcome / rules screen'], ['brief', 'Briefing — “Round 2 starts in…”'], ['transition', 'Break — “Next up…”'], ['finish', 'Finish screen']].map(([k, label]) => `<div class="row between">
+        ${[['brief', 'Instructions before each round — “Round 2 starts in…”'], ['finish', 'Finish screen']].map(([k, label]) => `<div class="row between">
           <label for="s-${k}" style="flex:1">${label}</label><input id="s-${k}" name="s_${k}" type="number" min="5" max="600" value="${d.phaseSeconds[k]}" style="width:5.5em"><span class="muted small">sec</span></div>`).join('')}
         <div><button class="btn">Save timing</button></div></form></section>
 
@@ -492,7 +492,7 @@ document.addEventListener('submit', async (e) => {
   e.preventDefault();
   const f = Object.fromEntries(new FormData(e.target));
   try {
-    if (kind === 'timing') await api('/api/admin/timing', { minutes: { 1: f.m1, 2: f.m2, 3: f.m3 }, seconds: { welcome: f.s_welcome, brief: f.s_brief, transition: f.s_transition, finish: f.s_finish } });
+    if (kind === 'timing') await api('/api/admin/timing', { minutes: { 1: f.m1, 2: f.m2, 3: f.m3 }, seconds: { brief: f.s_brief, finish: f.s_finish } });
     if (kind === 'school') await api('/api/admin/schools', f);
     if (kind === 'admin') await api('/api/admin/admins', f);
     toast('Saved.');

@@ -309,7 +309,7 @@ function welcomePage() {
         ${mascot('lg')}
         <p class="guide-say">Hi! I’m <b>Foldling</b>, your guide. Get ready for three fun challenges!</p>
       </div>
-      <h1>${esc(s.name.split(' ')[0])}, welcome to Bhanzu Promptothon!</h1>
+      <h1>${esc(s.name.split(' ')[0])}, welcome to Bhanzu Promptathon!</h1>
       <p class="motto"><span class="tint-1">Think fast.</span> <span class="tint-2">Check carefully.</span> <span class="tint-3">Make smart choices with AI.</span></p>
       <ol class="round-cards">${[1, 2, 3].map((r) => `<li class="tint-${r}"><span class="rc-icon" aria-hidden="true">${cfg.rounds[r].icon}</span>
         <span class="rc-num">Round ${r}</span><b>${esc(cfg.rounds[r].name)}</b><span class="rc-blurb">${esc(cfg.rounds[r].blurb)}</span></li>`).join('')}</ol>
@@ -702,16 +702,19 @@ function rulesView(kind, late = false) {
     <div class="guide-says">${mascot('sm')}<p class="guide-say">Foldling says: ${esc(R.says)}</p></div>` : '';
   const again = p.rulesSeen === `${kind}${late}`; // redrawn after the click (or a sync): show it as it was, don't replay the entrance
   p.rulesSeen = `${kind}${late}`;
-  const sideTitle = late ? `Round ${kind} is running` : isWelcome ? 'Round 1 briefing in' : `Round ${kind} starts in`;
+  const sideTitle = late ? `Round ${kind} is running` : `Round ${kind} starts in`;
+  const prev = kind > 1 && !late ? p.state.results?.rounds?.[kind - 2] : null;
   return `<div class="wrap"><div class="brief ${again ? 'still' : ''}">
     <div id="rules-text" class="measure">
       <div class="kicker">${isWelcome ? 'Before we begin' : `Round ${kind} of 3 · ${minuteText(minutes)} · ${R.max} points`}</div>
       <div class="round-title"><h1>${isWelcome ? 'Before you start' : `<span class="round-ico tint-${kind}" aria-hidden="true">${R.icon}</span> Round ${kind} — ${esc(R.name)}`}</h1></div>
       ${R ? `<p style="font-size:1.2rem;font-family:var(--font-head);font-weight:800;margin-bottom:6px">${esc(R.tagline)}</p>${R.intro.map((t) => `<p class="muted" style="font-size:1.05rem">${esc(t)}</p>`).join('')}` : ''}
       <p class="note warn" role="note"><b>⚠ Stay in this window.</b> If you leave it or switch tabs once the round starts, your test is paused and your host has to say yes before you can continue.</p>
-      ${speakBtn('#rules-text', 'Read the rules aloud')}
+      ${speakBtn('#rules-text', 'Read the instructions aloud')}
+      ${prev ? `<p class="note">Round ${kind - 1} is saved${prev.state === 'scored' ? ` — provisional score <b>${prev.total}/${prev.max}</b>` : ''}. Written answers are checked by the host before results are final.</p>` : ''}
+      ${kind === 1 ? `<h3 style="margin-top:16px">Before you start</h3>${list(cfg.rules.start)}<h3 style="margin-top:20px">Play fair</h3>${list(cfg.rules.general, cfg.rules.start.length)}` : ''}
       ${isWelcome ? `${list(cfg.rules.start)}<h3 style="margin-top:20px">Play fair</h3>${list(cfg.rules.general, cfg.rules.start.length)}`
-        : `<h3 style="margin-top:16px">How to play</h3>${list(cfg.rules[kind])}`}
+        : `<h3 style="margin-top:20px">How to play</h3>${list(cfg.rules[kind])}`}
       ${lifelines}
     </div>
     <aside class="stack">
@@ -742,7 +745,8 @@ function submittedView(r) {
     <div class="kicker">Round ${r} · ${esc(cfg.rounds[r].name)}</div><h1>Submitted ✓</h1>
     <p style="margin:0 auto 20px">Your answers are locked. ${r < 3 ? 'The next round starts on schedule for everyone — no need to rush.' : 'Results appear when the arena closes.'}</p>
     ${scoreCards([res])}
-    <p class="muted" style="margin-top:20px">Time left in this round: <b data-clock>0:00</b></p></div></div>`;
+    <p class="muted" style="margin-top:20px">Time left in this round: <b data-clock>0:00</b></p></div>
+    <section class="comic-band" aria-label="A comic to read while you wait"><h2 class="center">Done early? Enjoy a story with Foldling</h2>${comic(['rain', 'tiger', 'dog'][r - 1])}</section></div>`;
 }
 
 function transitionView(r) {
@@ -901,7 +905,7 @@ function r2View() {
     <div class="c2-cols" id="case-all">
       <section class="card paper c2-col" aria-label="The AI’s answer"><h3>The AI’s answer</h3>
         ${v.output.map((o) => `<div class="para"><span class="tag">${esc(o.label)}</span><span>${esc(o.text)}</span></div>`).join('')}</section>
-      <section class="card paper c2-col" aria-label="Evidence cards"><h3>Evidence cards</h3>
+      <section class="card paper c2-col" aria-label="Evidence cards provided by your teacher"><h3>Evidence cards provided by your teacher</h3>
         <div class="stack">${v.evidence.map((e) => `<div class="evi"><span class="tag">${esc(e.id)}</span><span>${esc(e.text)}</span></div>`).join('')}</div></section>
       <section class="c2-work">
         <nav class="qnav" aria-label="Puzzles">${R2_PUZZLES.map(([k, t], n) => `<button data-act="goto" data-i="${n}" class="${started[k] ? 'done' : ''}" ${n === i ? 'aria-current="step"' : ''}
@@ -941,8 +945,9 @@ function r3View() {
   const gens = c.generations || [], image = v.image;
   return `<div class="case">
     <section class="card paper casefile" id="target-card" aria-labelledby="t-h">
-      <div class="row between"><h2 id="t-h" style="margin:0">${image ? 'Target picture' : 'Target output'}</h2>${speakBtn('#target-card')}</div>
-      <p class="muted" style="margin:6px 0 14px">${esc(v.title)} · <span class="chip">${esc(v.audience)}</span></p>
+      <div class="row between"><h2 id="t-h" style="margin:0">AI has given the following output to us.</h2>${speakBtn('#target-card')}</div>
+      <p style="margin:6px 0 4px;font-weight:700">Write a prompt to generate the same or similar output</p>
+      <p class="muted" style="margin:0 0 14px">${esc(v.title)} · <span class="chip">${esc(v.audience)}</span></p>
       ${image ? `<figure class="target-img"><img src="/api/play/image/${encodeURIComponent(image.id)}" alt="${esc(image.alt)}">
         <figcaption class="small muted">${esc(image.alt)} <a href="/api/play/image/${encodeURIComponent(image.id)}" target="_blank" rel="noopener">Open full size</a></figcaption></figure>`
         : `<div class="target card">${targetHTML(v.output)}</div>`}
