@@ -75,7 +75,7 @@ export const TIME_ADJUST_RANGE = { min: 5, max: 1800 };    // one "add time" ste
 export const DEFAULT_FLOW = [
   { key: 'welcome', type: 'welcome', round: 0, sec: 45, title: 'Rules and readiness',
     script: 'Welcome to the AI Challenge Arena! Three rounds, eight minutes each. Your answers save as you work. Use your lifelines wisely.' },
-  { key: 'r1-brief', type: 'brief', round: 1, sec: 30, title: 'AI Blitz briefing',
+  { key: 'r1-brief', type: 'brief', round: 1, sec: 60, title: 'AI Blitz briefing',
     script: 'First up: AI Blitz! Answer eight quick challenges and the final boss. You have eight minutes, fifty–fifty and one clue. Ready?' },
   { key: 'r1', type: 'round', round: 1, sec: ROUND_SECONDS, title: 'AI Blitz' },
   { key: 'r1-done', type: 'transition', round: 1, sec: 15, title: 'Round lock and update',

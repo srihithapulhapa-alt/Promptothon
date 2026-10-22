@@ -32,7 +32,7 @@ export function activeEvent() {
 export const isAdmin = (email) => email === env.defaultAdmin || db.admins.some((a) => a.email === email);
 
 // ---------- timing (admin-editable lengths for the rounds and for the screens between them) ----------
-const PHASES = ['welcome', 'brief', 'transition', 'finish'];
+const PHASES = ['brief', 'finish'];
 export const roundMinutes = () => Object.fromEntries([1, 2, 3].map((r) => [r, db.settings.roundMinutes?.[r] ?? ROUND_MINUTES_RANGE.default]));
 export const phaseSeconds = () => Object.fromEntries(PHASES.map((k) => [k, db.settings.phaseSeconds?.[k] ?? getFlow().find((p) => p.type === k)?.sec ?? 30]));
 

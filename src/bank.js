@@ -13,7 +13,8 @@ let bank = null;
 let flow = DEFAULT_FLOW;
 let skills = SKILLS;
 const images = new Map(); // image id → { buf, type } — resized for the web, served only to the student the target was drawn for
-export const getFlow = () => flow;
+// Rules and the round-to-round break are folded into each round's briefing, so kids see one timer per set of instructions.
+export const getFlow = () => flow.filter((p) => p.type !== 'welcome' && p.type !== 'transition');
 export const bankInfo = () => bank && { meta: bank.meta, counts: counts() };
 export const getSkills = () => skills;
 export const imageFor = (id) => images.get(id);
