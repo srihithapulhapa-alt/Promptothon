@@ -251,8 +251,15 @@ async function timeDialog({ ids = null, scope = 'everyone playing', target = 'cu
 // ---------------------------------------------------------------- score cards
 const when = (t) => (t ? new Date(t).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : '');
 
+const cf = { school: '', grade: '' };
+
 async function cards() {
-  const d = await api('/api/admin/scorecards'), rows = d.rows;
+  const d = await api('/api/admin/scorecards'), all = d.rows;
+  const schools = [...new Set(all.map((r) => r.school).filter(Boolean))].sort(), grades = [...new Set(all.map((r) => String(r.grade)).filter(Boolean))].sort((a, b) => a - b);
+  if (cf.school && !schools.includes(cf.school)) cf.school = '';
+  if (cf.grade && !grades.includes(cf.grade)) cf.grade = '';
+  const rows = all.filter((r) => (!cf.school || r.school === cf.school) && (!cf.grade || String(r.grade) === cf.grade));
+  st.cardRows = rows;
   const ready = rows.filter((r) => !r.archived && !r.approved && r.status !== 'pending').length;
   const unsent = rows.filter((r) => r.approved && (!r.emailedAt || r.changedSinceEmailed)).length;
   const statusChip = { pending: '<span class="chip warn">Marking…</span>', provisional: '<span class="chip">Provisional</span>', final: '<span class="chip ok">Final</span>' };
@@ -266,6 +273,10 @@ async function cards() {
       <button class="btn ghost" data-admin="cards-test" ${d.emailReady ? '' : 'disabled'}>Send me a sample</button>
       <label class="check grow" style="justify-content:flex-end"><input type="checkbox" data-admin-change="cards-auto" ${d.autoSend ? 'checked' : ''} ${d.emailReady ? '' : 'disabled'}><span>Email automatically when a card is approved</span></label>
     </div>
+    <div class="filters" role="group" aria-label="Filter score cards">
+      <div class="field"><label for="cf-school">School</label><select id="cf-school" data-admin-change="cards-school"><option value="">All schools</option>${schools.map((x) => `<option value="${esc(x)}" ${cf.school === x ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select></div>
+      <div class="field"><label for="cf-grade">Grade</label><select id="cf-grade" data-admin-change="cards-grade"><option value="">All grades</option>${grades.map((x) => `<option value="${esc(x)}" ${cf.grade === x ? 'selected' : ''}>Grade ${esc(x)}</option>`).join('')}</select></div>
+      <p class="muted small" style="align-self:end;margin:0">Showing ${rows.length} of ${all.length}. Approve and email buttons act on the cards shown.</p></div>
     <div class="table-wrap"><table class="t"><thead><tr><th>Student</th><th>Sends to</th><th class="num">Total</th><th>Marks</th><th>Approved</th><th>Emailed</th><th></th></tr></thead><tbody>
     ${rows.length ? rows.map((r) => `<tr><td><b>${esc(r.name)}</b>${r.edited ? ' <span class="chip brand">Edited</span>' : ''}${r.archived ? ' <span class="chip">Earlier attempt</span>' : ''}
         <div class="muted small">${esc(r.code)} · Grade ${esc(r.grade)} · ${esc(r.school)}${r.run ? ` · Run ${r.run}` : ''}</div></td>
@@ -446,14 +457,14 @@ document.addEventListener('click', async (e) => {
     if (act === 'card-approve') { await api('/api/admin/scorecards/approve', { attemptIds: [el.dataset.id], approved: el.dataset.on === 'true' }); toast(el.dataset.on === 'true' ? 'Approved — the student can see it now.' : 'Hidden from the student.'); return renderAdmin(root, 'cards', ctx); }
     if (act === 'cards-approve-all') {
       if (await dialog({ title: 'Approve all ready cards?', body: '<p>Every card whose marking is complete becomes visible to its student.</p>', actions: [{ label: 'Cancel', value: 'no', kind: 'ghost' }, { label: 'Approve all', value: 'yes' }] }) !== 'yes') return;
-      const r = await api('/api/admin/scorecards/approve', { all: true });
+      const r = await api('/api/admin/scorecards/approve', { attemptIds: st.cardRows.filter((c) => !c.archived && !c.approved && c.status !== 'pending').map((c) => c.attemptId) });
       toast(`${r.done} approved.`);
       return renderAdmin(root, 'cards', ctx);
     }
     if (act === 'cards-send-all') {
       if (await dialog({ title: 'Email approved score cards?', body: '<p>Each approved card is emailed as a PDF to the address saved from that student’s Google sign-in. Cards already sent and unchanged are skipped.</p>', actions: [{ label: 'Cancel', value: 'no', kind: 'ghost' }, { label: 'Send emails', value: 'yes' }] }) !== 'yes') return;
       el.disabled = true; el.textContent = 'Sending…';
-      await sendReport(await api('/api/admin/scorecards/send', {}));
+      await sendReport(await api('/api/admin/scorecards/send', { attemptIds: st.cardRows.filter((c) => c.approved).map((c) => c.attemptId) }));
       return renderAdmin(root, 'cards', ctx);
     }
     if (act === 'card-send') { el.disabled = true; await sendReport(await api('/api/admin/scorecards/send', { attemptIds: [el.dataset.id], resend: true })); return renderAdmin(root, 'cards', ctx); }
@@ -482,6 +493,7 @@ document.addEventListener('change', (e) => {
   if (e.target.dataset.adminChange === 'lb-school') { st.lbSchool = e.target.value; leaderboard(); }
   if (e.target.dataset.adminChange === 'rep-school') $('#rep-one').href = `/api/admin/export.xlsx?school=${encodeURIComponent(e.target.value)}`;
   if (e.target.dataset.adminChange === 'cards-auto') api('/api/admin/scorecards/auto-send', { on: e.target.checked }).then(() => toast(e.target.checked ? 'Cards will be emailed as soon as you approve them.' : 'Automatic emailing is off.')).catch((err) => toast(err.message));
+  if (['cards-school', 'cards-grade'].includes(e.target.dataset.adminChange)) { cf[e.target.dataset.adminChange === 'cards-school' ? 'school' : 'grade'] = e.target.value; cards(); }
   if (e.target.dataset.adminChange === 'lb-run') { st.lbRun = e.target.value; leaderboard(); }
   if (e.target.dataset.adminChange === 'r3-mode') api('/api/admin/r3-mode', { mode: e.target.value }).then(() => { toast('Saved.'); return api('/api/admin/overview'); }).then((o) => { st.data = o; }).catch((err) => toast(err.message));
 });
