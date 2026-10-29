@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400&family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&display=swap">
-  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/styles.css?v=2">
 </head>
 <body>
   <header class="top">
@@ -45,6 +45,12 @@
       img.alt = `Guide page ${at} of ${total}`;
       img.className = 'in' + (back ? ' back' : '');
       page.replaceChildren(img);
+      if (at === total) { // the last page has an "Enter the Lobby" button drawn on it: make it a real link
+        const go = document.createElement('a');
+        go.href = '/#/play'; go.className = 'to-lobby'; go.setAttribute('aria-label', 'Enter the Lobby');
+        go.onclick = () => document.fullscreenElement && document.exitFullscreen().catch(() => {});
+        page.append(go);
+      }
       count.textContent = `${at} of ${total}`;
       prev.disabled = at === 1; next.disabled = at === total;
       const ahead = new Image(); ahead.src = `/guide/${Math.min(total, at + 1)}.jpg`;

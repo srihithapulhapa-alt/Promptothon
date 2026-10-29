@@ -11,7 +11,7 @@ import { cardPdf, cardFileName, cardsZip, emailReady, sendCards, sendTestEmail }
 
 const app = express();
 app.use(express.json({ limit: '200kb' }));
-app.use(express.static(path.resolve('public'), { extensions: ['html'] }));
+app.use(express.static(path.resolve('public'), { extensions: ['html'], setHeaders: (res) => res.set('Cache-Control', 'no-cache') })); // browsers re-check, so an update shows on the next load
 
 // ---------- sessions: a signed cookie that carries the whole session, so nothing is lost when the server restarts ----------
 const sign = (v) => `${v}.${crypto.createHmac('sha256', env.sessionSecret).update(v).digest('base64url')}`;

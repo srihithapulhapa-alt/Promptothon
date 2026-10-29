@@ -415,7 +415,7 @@ async function leaderboardPage() {
 
 // ---------------------------------------------------------------- the test
 const p = {};
-function stopPlay() { clearInterval(p.syncInt); clearInterval(p.clockInt); p.active = false; document.documentElement.classList.remove('guard'); watermark(''); }
+function stopPlay() { clearInterval(p.syncInt); clearInterval(p.clockInt); p.active = false; document.documentElement.classList.remove('guard', 'in-round'); watermark(''); }
 
 function deviceId() {
   let id = store.get('pt-device');
@@ -582,6 +582,12 @@ function updateClock() {
       const k = `${ph.key}-${id}`;
       if (f <= hi && f > lo && !p.announced[k]) { p.announced[k] = true; mascotTip(TIPS[id]); }
     }
+    // A minute on the same question: Foldling reminds them, once per question, that lifelines are there.
+    const c = p.content, q = `${ph.key}-q${p.qi}`;
+    if (p.onQ?.key !== q) p.onQ = { key: q, at: performance.now() };
+    else if (c?.round === ph.round && performance.now() - p.onQ.at > 60000 && !p.announced[q] && c.lifelines.used.length < cfg.lifelinesPerRound) {
+      p.announced[q] = true; mascotTip('Stuck? That’s okay! Try a lifeline — the buttons are at the top.');
+    }
   }
   if (p.star && p.starUntilPhase && left <= 2000) hideStar();
   if (ph.remainingMs != null && left < -1200 && !p.busy) syncTick();
@@ -629,11 +635,27 @@ function view(html) {
   main.innerHTML = html;
   if (fileTop && $('#casefile')) $('#casefile').scrollTop = fileTop;
   startMascot(main);
-  const gb = $('.gamebar'); document.documentElement.style.setProperty('--game-h', `${gb ? gb.offsetHeight : 0}px`); // round 2 fits the screen under the bars
+  const gb = $('.gamebar');
+  document.documentElement.classList.toggle('in-round', !!gb); // header and footer step aside while a round is open
+  syncTopH();
+  document.documentElement.style.setProperty('--game-h', `${gb ? gb.offsetHeight : 0}px`); // rounds 2 and 3 fit the screen under the bar
+  fitScreen();
   updateStatus();
   updateClock();
   if (keepScroll) window.scrollTo(0, y); else focusMain();
 }
+
+// Rounds 2 and 3 never scroll: the round is laid out for 640px of height, and on a shorter window it shrinks a little to fit.
+const SCREEN_H = 640;
+function fitScreen() {
+  const r = document.documentElement.style, el = $('.play:has(.screen)');
+  if (!el || innerWidth < 960) { r.removeProperty('--fit'); r.removeProperty('--screen-h'); return; } // phones and tablets stack and scroll
+  const avail = innerHeight - ($('.gamebar')?.offsetHeight || 0) - 22;
+  const fit = Math.max(0.6, Math.min(1, avail / SCREEN_H));
+  r.setProperty('--fit', fit);
+  r.setProperty('--screen-h', `${Math.round(avail / fit)}px`);
+}
+addEventListener('resize', fitScreen);
 
 async function loadContent() {
   if (p.loading) return;
@@ -687,6 +709,23 @@ function lobbyView() {
     <section class="comic-band" aria-label="Comics to read while you wait"><h2 class="center">While you wait — more stories with Foldling</h2>${comic('tiger')}${comic('dog')}</section></div>`;
 }
 
+// Foldling's two comic pages for each round, shown in place of written instructions (images in /rounds).
+const SLIDES = {
+  1: ['Round 1, AI Blitz: a quick quiz round. Read the question, choose your answer, and move to the next one. Answer as many as you can in the given time.',
+    'Round 1 example: three sample questions, each with picture options. Read the question and choose the best answer.'],
+  2: ['Round 2, Crack the AI Case: an AI answer has a mistake and your mission is to find it. Read the answer, check the clues on the evidence cards, and fix the mistake.',
+    'Round 2 example: the AI says a plant died from too much water, but the evidence cards show the soil was dry. Always use evidence.'],
+  3: ['Round 3, Match the Output: the answer comes first. Look carefully at the picture or text, notice the important details, and write a clear prompt that could make something like it.',
+    'Round 3 example: a purple octopus in a chef’s hat making pizza in a kitchen. Put the clues together into one prompt. More useful details make a better matching prompt.'],
+};
+function slides(r) {
+  const at = (p.slide ||= {})[r] || 0, n = SLIDES[r].length;
+  return `<div class="slides"><div class="slide-page"><img id="slide-img" src="/rounds/${r}-${at + 1}.jpg" alt="${esc(SLIDES[r][at])}"></div>
+    <div class="book-nav"><button class="btn ghost" data-act="slide" data-r="${r}" data-d="-1" ${at === 0 ? 'disabled' : ''}>← Previous</button>
+      <span class="chip" aria-live="polite">${at + 1} of ${n}</span>
+      <button class="btn ghost" data-act="slide" data-r="${r}" data-d="1" ${at === n - 1 ? 'disabled' : ''}>Next →</button></div></div>`;
+}
+
 function rulesView(kind, late = false) {
   const st = p.state, ph = st.phase;
   const isWelcome = kind === 'welcome';
@@ -695,11 +734,7 @@ function rulesView(kind, late = false) {
   const acked = Boolean(st.acks[ackKey]);
   const list = (items, i0 = 0) => `<ol class="rules">${items.map((r, i) => `<li style="--i:${i + i0}"><span>${esc(r)}</span></li>`).join('')}</ol>`;
   const minutes = Math.round((st.roundSeconds?.[kind] || 480) / 60);
-  const lifelines = R ? `<h3 style="margin-top:20px">Your lifelines</h3>
-    <ul>${R.lifelines.map((l) => `<li><b>${esc(l.name)}</b> — ${esc(l.desc)}</li>`).join('')}</ul>
-    <p class="muted">${esc(R.lifelineNote)} They cost no points and never add time.</p>
-    <p><b>Time:</b> ${minuteText(minutes)} · <b>Points:</b> ${esc(R.points)}</p>
-    <div class="guide-says">${mascot('sm')}<p class="guide-say">Foldling says: ${esc(R.says)}</p></div>` : '';
+  const warning = '<p class="note warn" role="note"><b>⚠ Stay in this window.</b> If you leave it or switch tabs once the round starts, your test is paused and your host has to say yes before you can continue.</p>';
   const again = p.rulesSeen === `${kind}${late}`; // redrawn after the click (or a sync): show it as it was, don't replay the entrance
   p.rulesSeen = `${kind}${late}`;
   const sideTitle = late ? `Round ${kind} is running` : `Round ${kind} starts in`;
@@ -708,14 +743,12 @@ function rulesView(kind, late = false) {
     <div id="rules-text" class="measure">
       <div class="kicker">${isWelcome ? 'Before we begin' : `Round ${kind} of 3 · ${minuteText(minutes)} · ${R.max} points`}</div>
       <div class="round-title"><h1>${isWelcome ? 'Before you start' : `<span class="round-ico tint-${kind}" aria-hidden="true">${R.icon}</span> Round ${kind} — ${esc(R.name)}`}</h1></div>
-      ${R ? `<p style="font-size:1.2rem;font-family:var(--font-head);font-weight:800;margin-bottom:6px">${esc(R.tagline)}</p>${R.intro.map((t) => `<p class="muted" style="font-size:1.05rem">${esc(t)}</p>`).join('')}` : ''}
-      <p class="note warn" role="note"><b>⚠ Stay in this window.</b> If you leave it or switch tabs once the round starts, your test is paused and your host has to say yes before you can continue.</p>
-      ${speakBtn('#rules-text', 'Read the instructions aloud')}
+      ${isWelcome ? `${warning}${speakBtn('#rules-text', 'Read the instructions aloud')}
+        ${list(cfg.rules.start)}<h3 style="margin-top:20px">Play fair</h3>${list(cfg.rules.general, cfg.rules.start.length)}`
+        : `${slides(kind)}
+        <p class="round-time"><span aria-hidden="true">⏱</span> <b>Time:</b> ${minuteText(minutes)}</p>
+        ${warning}${speakBtn('#rules-text', 'Read the instructions aloud')}`}
       ${prev ? `<p class="note">Round ${kind - 1} is saved${prev.state === 'scored' ? ` — provisional score <b>${prev.total}/${prev.max}</b>` : ''}. Written answers are checked by the host before results are final.</p>` : ''}
-      ${kind === 1 ? `<h3 style="margin-top:16px">Before you start</h3>${list(cfg.rules.start)}<h3 style="margin-top:20px">Play fair</h3>${list(cfg.rules.general, cfg.rules.start.length)}` : ''}
-      ${isWelcome ? `${list(cfg.rules.start)}<h3 style="margin-top:20px">Play fair</h3>${list(cfg.rules.general, cfg.rules.start.length)}`
-        : `<h3 style="margin-top:20px">How to play</h3>${list(cfg.rules[kind])}`}
-      ${lifelines}
     </div>
     <aside class="stack">
       ${ph.script && !late ? `<div class="guide-brief">${mascot('sm')}${narration(ph.script)}</div>` : ''}
@@ -899,14 +932,14 @@ function r2View() {
   const started = { rebuild: chosen.length, spot: d.spot?.paragraph || d.spot?.why, match: d.match?.evidence || d.match?.why, repair: d.repair?.text || d.repair?.why };
   const i = Math.min(Math.max(p.qi, 0), R2_PUZZLES.length - 1), [key, title] = R2_PUZZLES[i], last = i === R2_PUZZLES.length - 1;
   // One screen, no scrolling: the case sits on the left (answer + evidence), one puzzle at a time on the right.
-  return `<div class="case2">
+  return `<div class="case2 screen">
     <div class="c2-head"><b id="case-title">${esc(v.title)}</b> <span class="muted">${esc(v.context)}</span>${speakBtn('#case-all')}</div>
     ${lifelineNote(ll.compass, 'Case Compass')}
     <div class="c2-cols" id="case-all">
       <section class="card paper c2-col" aria-label="The AI’s answer"><h3>The AI’s answer</h3>
         ${v.output.map((o) => `<div class="para"><span class="tag">${esc(o.label)}</span><span>${esc(o.text)}</span></div>`).join('')}</section>
       <section class="card paper c2-col" aria-label="Evidence cards provided by your teacher"><h3>Evidence cards provided by your teacher</h3>
-        <div class="stack">${v.evidence.map((e) => `<div class="evi"><span class="tag">${esc(e.id)}</span><span>${esc(e.text)}</span></div>`).join('')}</div></section>
+        <div class="evi-grid">${v.evidence.map((e) => `<div class="evi"><span class="tag">${esc(e.id)}</span><span>${esc(e.text)}</span></div>`).join('')}</div></section>
       <section class="c2-work">
         <nav class="qnav" aria-label="Puzzles">${R2_PUZZLES.map(([k, t], n) => `<button data-act="goto" data-i="${n}" class="${started[k] ? 'done' : ''}" ${n === i ? 'aria-current="step"' : ''}
           aria-label="Puzzle ${n + 1}: ${t}${started[k] ? ', started' : ''}">${n + 1}</button>`).join('')}</nav>
@@ -943,17 +976,17 @@ function targetHTML(lines) {
 function r3View() {
   const c = p.content, v = c.view, d = p.draft, ll = c.lifelines.data;
   const gens = c.generations || [], image = v.image;
-  return `<div class="case">
+  return `<div class="case screen">
     <section class="card paper casefile" id="target-card" aria-labelledby="t-h">
       <div class="row between"><h2 id="t-h" style="margin:0">AI has given the following output to us.</h2>${speakBtn('#target-card')}</div>
       <p style="margin:6px 0 4px;font-weight:700">Write a prompt to generate the same or similar output</p>
       <p class="muted" style="margin:0 0 14px">${esc(v.title)} · <span class="chip">${esc(v.audience)}</span></p>
       ${image ? `<figure class="target-img"><img src="/api/play/image/${encodeURIComponent(image.id)}" alt="${esc(image.alt)}">
-        <figcaption class="small muted">${esc(image.alt)} <a href="/api/play/image/${encodeURIComponent(image.id)}" target="_blank" rel="noopener">Open full size</a></figcaption></figure>`
+        <figcaption class="small muted">${esc(image.alt)} <button class="btn ghost sm" data-act="zoom" data-src="/api/play/image/${encodeURIComponent(image.id)}" data-alt="${esc(image.alt)}">⤢ View bigger</button></figcaption></figure>`
         : `<div class="target card">${targetHTML(v.output)}</div>`}
       ${lifelineNote(ll.goal, 'Goal Lens')}${lifelineNote(ll.structure, 'Structure Scan')}
     </section>
-    <div class="stack">
+    <div class="r3-work">
       <section class="card stack">
         <div class="field"><label for="r3-prompt">Your prompt</label><span class="hint">Say what to make, who it is for, what it must include and how it should be laid out.</span>
           <textarea id="r3-prompt" data-field="prompt" data-nopaste rows="8" maxlength="3000" placeholder="For example: Write a short, friendly notice for Grade 6 students about…">${esc(d.prompt || '')}</textarea>
@@ -975,6 +1008,7 @@ for (const t of ['paste', 'drop', 'copy', 'cut']) document.addEventListener(t, (
   e.preventDefault();
   if (t === 'paste' || t === 'drop') toast('Pasting is switched off in Round 3 — please type your answer.');
 });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && $('.zoom')) actions['zoom-close'](); });
 document.addEventListener('keydown', (e) => { // Shift+Insert also pastes on some systems
   if (e.shiftKey && e.key === 'Insert' && e.target.closest?.('[data-nopaste]')) e.preventDefault();
 });
@@ -1057,6 +1091,21 @@ const actions = {
     speech.speak('Sound is on. Each briefing will be read aloud. Good luck!');
     renderPlay();
   },
+  slide: (el) => {
+    const r = el.dataset.r, d = Number(el.dataset.d);
+    p.slide[r] = Math.min(SLIDES[r].length - 1, Math.max(0, (p.slide[r] || 0) + d));
+    $('.slides').outerHTML = slides(r);
+    $(`.slides [data-d="${d}"]:not([disabled])`)?.focus();
+  },
+  zoom: (el) => { // the picture opens over the test, in this tab: a new tab would count as leaving the window
+    const ov = document.createElement('div');
+    ov.className = 'overlay zoom';
+    ov.setAttribute('role', 'dialog'); ov.setAttribute('aria-modal', 'true'); ov.setAttribute('aria-label', 'Picture, full size');
+    ov.innerHTML = `<button class="zoom-x" data-act="zoom-close" aria-label="Close the picture and go back to the test">✕</button><img src="${esc(el.dataset.src)}" alt="${esc(el.dataset.alt)}">`;
+    document.body.append(ov);
+    ov.querySelector('button').focus();
+  },
+  'zoom-close': () => { $('.zoom')?.remove(); $('[data-act="zoom"]')?.focus(); },
   ack: (el) => { p.pendingAck = el.dataset.key; p.state.acks[el.dataset.key] = Date.now(); p.lastKey = ''; applyState(p.state); syncTick(); },
   takeover: async () => {
     try {
