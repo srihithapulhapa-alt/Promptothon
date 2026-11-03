@@ -130,8 +130,6 @@ export const liveStudentOf = (email) => studentsOf(email).find((st) => { const a
 export function selectStudent(session, studentId) {
   const s = studentById(studentId);
   if (!s || s.email !== session.email) fail('Student not found.', 404);
-  const live = liveStudentOf(session.email); // holds even after signing in again on another device
-  if (live && live.id !== s.id) fail('A test is in progress for another student on this account — you can switch once it ends.', 409);
   session.studentId = s.id;
   s.lockedAt ??= now();
   ensureAttempt(s);

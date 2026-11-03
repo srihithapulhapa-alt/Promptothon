@@ -85,8 +85,10 @@ app.get('/api/me', (req, res) => {
   if (!s) return res.json({ signedIn: false });
   const out = { signedIn: true, email: s.email, name: s.name, picture: s.picture, role: role(s) };
   if (out.role === 'student') {
-    const live = game.liveStudentOf(s.email); // a test in progress stays with its student, on any device
-    if (live && s.studentId !== live.id) { s.studentId = live.id; issue(res, s); }
+    // A device that hasn't picked a student resumes the live test — only when exactly one is live on this account
+    // (many students may share one account; a device that already picked keeps its own student).
+    const live = game.studentsOf(s.email).filter((st) => ['running', 'paused'].includes(game.currentAttempt(st.id)?.status));
+    if (!s.studentId && live.length === 1) { s.studentId = live[0].id; issue(res, s); }
     out.studentId = s.studentId;
     out.students = game.studentsOf(s.email).map((st) => {
       const a = game.currentAttempt(st.id);
