@@ -1,13 +1,17 @@
-// Game engine: events, students, attempts, the server-side clock, admin controls, results and exports.
+// Game engine: the open/closed gate, students, attempts, the server-side clock, admin controls, results and exports.
+//
+// Identity: students have no sign-in. Registering gives a player token that the browser keeps for that one tab only
+// (sessionStorage), so many children on one shared computer or browser profile can never become each other.
+// Every student function below takes the student (resolved from that token by server.js), never a cookie.
 import crypto from 'node:crypto';
 import { zipSync } from 'fflate';
 import { env, POLICY_VERSION, BANDS, GRADES, bandOf, ROUNDS, SCORE_PARTS, LIFELINES_PER_ROUND, SAVE_GRACE_MS, R3_GENERATIONS,
-  AWARDS, EVENT_NAME, ROUND_MINUTES_RANGE, PHASE_SECONDS_RANGE, TIME_ADJUST_RANGE, R3_MODES, LOBBY_SEEN_MS, MAX_PHONES, APP_NAME, SKILL_LABELS } from './config.js';
+  AWARDS, EVENT_NAME, ROUND_MINUTES_RANGE, PHASE_SECONDS_RANGE, TIME_ADJUST_RANGE, LOBBY_SEEN_MS, ONLINE_MS, MAX_PHONES, MAX_STUDENTS,
+  APP_NAME, SKILL_LABELS, PRACTICE_SECONDS, IMAGE_LINK_HOURS, R2_HINTS, R3_LENS, RATINGS } from './config.js';
 import { db, save, uid } from './store.js';
-import { getFlow, drawRound, publicView, bandProblems, imageFor } from './bank.js';
+import { getFlow, drawRound, publicView, bandProblems, imageFor, getSkills as getSkillsList } from './bank.js';
 import { scorecards, scorecard, baseCard, renderScorecard } from './scorecard.js';
-import { getSkills as getSkillsList } from './bank.js';
-import { scoreRound, generate } from './scoring.js';
+import { scoreRound, generate, partsFor } from './scoring.js';
 
 export class GameError extends Error {
   constructor(message, status = 400, code) { super(message); this.status = status; this.code = code; }
@@ -15,8 +19,12 @@ export class GameError extends Error {
 const fail = (msg, status, code) => { throw new GameError(msg, status, code); };
 const now = () => Date.now();
 const LIVE = ['running', 'paused'];
+const ENDED = ['finished', 'stopped'];
 const iso = (t) => (t ? new Date(t).toISOString().replace('T', ' ').slice(0, 19) : '');
 const clip = (s, n = 1500) => String(s ?? '').slice(0, n);
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+const hmac = (v) => crypto.createHmac('sha256', env.sessionSecret).update(v).digest('base64url').slice(0, 32);
+const safeEq = (a, b) => { const x = Buffer.from(String(a)), y = Buffer.from(String(b)); return x.length === y.length && crypto.timingSafeEqual(x, y); };
 
 // ---------- events, roles ----------
 export function activeEvent() {
@@ -31,34 +39,51 @@ export function activeEvent() {
 
 export const isAdmin = (email) => email === env.defaultAdmin || db.admins.some((a) => a.email === email);
 
-// ---------- timing (admin-editable lengths for the rounds and for the screens between them) ----------
-const PHASES = ['brief', 'finish'];
+// ---------- the gate: Promptathon is open or closed until an admin changes it (saved in the sheet, so it survives restarts) ----------
+export const gate = () => ({ open: Boolean(db.settings.gate?.open), changedAt: db.settings.gate?.at || null, by: db.settings.gate?.by || '' });
+export const requireOpen = () => { if (!gate().open) fail('Promptathon is closed right now. Please wait for your host to open it.', 423, 'closed'); };
+
+// Closing pauses every running test (their clocks stop); opening again resumes exactly those tests.
+export function setGate(open, by) {
+  const t = now();
+  let paused = 0, resumed = 0;
+  for (const a of db.attempts) {
+    if (a.archived) continue;
+    if (!open && a.status === 'running') { Object.assign(a, { status: 'paused', pausedAt: t, closedPause: true }); paused++; }
+    if (open && a.status === 'paused' && a.closedPause) {
+      Object.assign(a, { status: 'running', pausedMs: a.pausedMs + (t - a.pausedAt), pausedAt: null });
+      delete a.closedPause;
+      resumed++;
+    }
+  }
+  db.settings.gate = { open: Boolean(open), at: t, by };
+  save(true);
+  return { ...gate(), paused, resumed };
+}
+
+// ---------- timing (admin-editable lengths) ----------
 export const roundMinutes = () => Object.fromEntries([1, 2, 3].map((r) => [r, db.settings.roundMinutes?.[r] ?? ROUND_MINUTES_RANGE.default]));
-export const phaseSeconds = () => Object.fromEntries(PHASES.map((k) => [k, db.settings.phaseSeconds?.[k] ?? getFlow().find((p) => p.type === k)?.sec ?? 30]));
+const practiceSeconds = () => db.settings.practiceSeconds ?? PRACTICE_SECONDS.default;
+export const phaseSeconds = () => ({ brief: practiceSeconds(), finish: db.settings.phaseSeconds?.finish ?? getFlow().find((p) => p.type === 'finish')?.sec ?? 45 });
 
 // Applies to students who have not started yet; anyone already playing keeps their schedule (use phaseTime for them).
 export function setTiming({ minutes = {}, seconds = {} } = {}) {
-  const m = {}, sec = {};
+  const m = {};
   for (const r of [1, 2, 3]) {
     m[r] = Math.round(Number(minutes[r]));
     if (!(m[r] >= ROUND_MINUTES_RANGE.min && m[r] <= ROUND_MINUTES_RANGE.max)) fail(`Round ${r} must be between ${ROUND_MINUTES_RANGE.min} and ${ROUND_MINUTES_RANGE.max} minutes.`);
   }
-  for (const k of PHASES) {
-    sec[k] = Math.round(Number(seconds[k]));
-    if (!(sec[k] >= PHASE_SECONDS_RANGE.min && sec[k] <= PHASE_SECONDS_RANGE.max)) fail(`Each screen between rounds must last ${PHASE_SECONDS_RANGE.min}–${PHASE_SECONDS_RANGE.max} seconds.`);
-  }
+  const brief = Math.round(Number(seconds.brief)), finish = Math.round(Number(seconds.finish));
+  if (!(brief >= PRACTICE_SECONDS.min && brief <= PRACTICE_SECONDS.max)) fail(`Instructions and practice may last ${PRACTICE_SECONDS.min / 60}–${PRACTICE_SECONDS.max / 60} minutes.`);
+  if (!(finish >= PHASE_SECONDS_RANGE.min && finish <= PHASE_SECONDS_RANGE.max)) fail(`The finish screen must last ${PHASE_SECONDS_RANGE.min}–${PHASE_SECONDS_RANGE.max} seconds.`);
   db.settings.roundMinutes = m;
-  db.settings.phaseSeconds = sec;
+  db.settings.practiceSeconds = brief;
+  db.settings.phaseSeconds = { ...(db.settings.phaseSeconds || {}), finish };
   save(true);
 }
 
-// ---------- Round 3 target kinds (text and image at random, or one kind only) ----------
-export const r3Mode = () => db.settings.r3Mode || 'mixed';
-export function setR3Mode(mode) {
-  if (!R3_MODES.some((m) => m.id === mode)) fail('Choose text, image or both.');
-  db.settings.r3Mode = mode;
-  save(true);
-}
+const scheduleFor = (filter = () => true) => getFlow().filter(filter).map(({ key, type, round, sec, title, script }) => ({ key, type, round,
+  sec: type === 'round' ? roundMinutes()[round] * 60 : type === 'brief' ? practiceSeconds() : type === 'finish' ? phaseSeconds().finish : sec, title, script }));
 
 // ---------- students ----------
 const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -69,15 +94,14 @@ function newCode() {
   return c;
 }
 
-export const studentsOf = (email) => db.students.filter((s) => s.email === email);
-const studentById = (id) => db.students.find((s) => s.id === id);
+export const studentById = (id) => db.students.find((s) => s.id === id);
 const schoolName = (id) => db.schools.find((s) => s.id === id)?.name || '—';
 export const displayName = (s) => {
   const [first, ...rest] = s.name.trim().split(/\s+/);
   return rest.length ? `${first} ${rest.at(-1)[0].toUpperCase()}.` : first;
 };
 
-// Optional phone numbers: as many as the family wants (up to MAX_PHONES), each 6–15 digits with an optional leading +.
+// Phone numbers: 6–15 digits with an optional leading +.
 function cleanPhones(list) {
   const out = [];
   for (const raw of (Array.isArray(list) ? list : [list]).map((x) => clip(x, 30).trim()).filter(Boolean)) {
@@ -88,30 +112,118 @@ function cleanPhones(list) {
   if (out.length > MAX_PHONES) fail(`You can add up to ${MAX_PHONES} phone numbers.`);
   return out;
 }
+const last10 = (p) => String(p).replace(/\D/g, '').slice(-10);
 
-export function createStudent(email, { name, grade, schoolId, phones, consent }) {
-  if (consent !== true) fail('Please confirm the parent or guardian consent first.');
+// The player token a browser tab keeps: student, login epoch and a signature, so it can't be guessed or edited.
+// A student's login is locked to that token until a host logs them out (which bumps the epoch and kills the token).
+export const playerToken = (s) => `${s.id}.${s.epoch || 0}.${hmac(`player:${s.id}:${s.epoch || 0}`)}`;
+export function studentFromToken(token) {
+  const [id, epoch, sig] = String(token || '').split('.');
+  if (!id || epoch === undefined || !sig || !safeEq(sig, hmac(`player:${id}:${epoch}`))) return { error: 'no-student' };
+  const s = studentById(id);
+  if (!s) return { error: 'no-student' };
+  if (!s.loggedIn || (s.epoch || 0) !== Number(epoch)) return { error: 'logged-out' };
+  return { student: s };
+}
+
+// One set of rules for joining and for editing yourself in the lobby.
+function cleanDetails({ name, grade, schoolId, phone, email }) {
   name = clip(name, 60).replace(/\s+/g, ' ').trim();
+  if (name.length < 2 || !/\p{L}/u.test(name)) fail('Please type your full name.');
   grade = Number(grade);
-  if (name.length < 2) fail('Please enter the student’s name.');
-  if (!GRADES.includes(grade)) fail('Please choose a grade between 3 and 12.');
-  if (!db.schools.some((s) => s.id === schoolId)) fail('Please choose a school.');
-  if (studentsOf(email).some((s) => s.name.toLowerCase() === name.toLowerCase() && s.grade === grade)) fail('This student already exists for your account.');
-  const s = { id: uid('st_'), code: newCode(), email, name, grade, schoolId, phones: cleanPhones(phones), createdAt: now(), lockedAt: null };
+  if (!GRADES.includes(grade)) fail(`Please choose your grade (${GRADES[0]}–${GRADES.at(-1)}).`);
+  if (!db.schools.some((x) => x.id === schoolId)) fail('Please choose your school.');
+  const phones = cleanPhones([phone]);
+  if (!phones.length) fail('Please type a phone number.');
+  email = clip(email, 120).trim().toLowerCase();
+  if (email && !EMAIL_RE.test(email)) fail('That email doesn’t look right. Check it, or leave it empty.');
+  return { name, grade, schoolId, phones, email };
+}
+// Joining = taking a seat in the lobby: name, grade, school, phone (required), email (optional). Joining ALWAYS makes a new player,
+// even with exactly the same details as someone else — the only way back into an existing player is their player code (loginWithCode).
+export function register(input = {}) {
+  requireOpen();
+  const v = cleanDetails(input);
+  if (input.consent !== true) fail('Please tick the box to show a parent, guardian or teacher said yes.');
+  if (db.students.length >= MAX_STUDENTS) fail('Registrations are full. Please tell your host.', 503);
+  const s = { id: uid('st_'), code: newCode(), email: v.email, name: v.name, grade: v.grade, schoolId: v.schoolId, phones: v.phones, createdAt: now(), lockedAt: null, epoch: 1, loggedIn: true };
   db.students.push(s);
-  db.consents.push({ id: uid('cn_'), studentId: s.id, email, kind: 'guardian', version: POLICY_VERSION, at: now() });
+  db.consents.push({ id: uid('cn_'), studentId: s.id, email: v.email, kind: 'guardian or teacher', version: POLICY_VERSION, at: now() });
   save(true);
-  return s;
+  return { student: s, returning: false };
+}
+
+// Logging back in with a player code (BZ-XXXXX). Works only when the seat is free — i.e. a host logged that player out —
+// so a code seen over someone's shoulder can't take over a window that is still playing.
+export const normalCode = (c) => { const x = String(c || '').toUpperCase().replace(/[^A-Z0-9]/g, ''); return x.length === 7 && x.startsWith('BZ') ? `BZ-${x.slice(2)}` : x.length === 5 ? `BZ-${x}` : ''; };
+export function loginWithCode(code) {
+  requireOpen();
+  const want = normalCode(code);
+  if (!want) fail('Type your player code — it looks like BZ-ABCDE.', 400, 'bad-code');
+  const s = db.students.find((x) => x.code === want);
+  if (!s) fail('We couldn’t find that player code. Check it, or ask your host — they can see every code.', 404, 'bad-code');
+  if (s.loggedIn) fail('This player is still logged in on another window. Ask your host to log that window out first.', 409, 'already-in');
+  Object.assign(s, { epoch: (s.epoch || 0) + 1, loggedIn: true });
+  save(true);
+  return { student: s };
+}
+
+// A player fixes their own details in the lobby. Locked once the test starts (the grade decides which questions they get).
+export function updateProfile(student, input = {}) {
+  requireOpen();
+  const a = currentAttempt(student.id);
+  if (a && a.status !== 'waiting') fail('Your details are locked once the test has started. Ask your host if something is wrong.', 409, 'locked');
+  const v = cleanDetails(input);
+  if (v.grade !== student.grade && gradeLocked(student)) fail('Your grade can’t change after you have played. Ask your host.', 409, 'locked');
+  Object.assign(student, { name: v.name, grade: v.grade, schoolId: v.schoolId, phones: [v.phones[0], ...(student.phones || []).slice(1).filter((p) => last10(p) !== last10(v.phones[0]))].slice(0, MAX_PHONES), email: v.email });
+  save(true);
+  return stateFor(ensureAttempt(student), student);
+}
+const gradeLocked = (s) => db.attempts.some((a) => a.studentId === s.id && a.startedAt);
+
+// A host logs players out of their windows. Their old token stops working at once; a running test is paused (the clock stops)
+// and stays paused until the player joins again and the host presses Resume.
+export function logoutStudents(studentIds) {
+  const out = { done: 0, skipped: 0, paused: 0 }, t = now();
+  for (const id of new Set(studentIds)) {
+    const s = studentById(id);
+    if (!s || !s.loggedIn) { out.skipped++; continue; }
+    Object.assign(s, { loggedIn: false, epoch: (s.epoch || 0) + 1 });
+    const a = currentAttempt(s.id);
+    if (a) {
+      if (a.status === 'running') {
+        Object.assign(a, { status: 'paused', pausedAt: t });
+        a.acks._lock = { at: t, count: a.acks._lock?.count || 0, reason: 'logout', requested: false, note: '' }; // they can ask to continue once back
+        out.paused++;
+      }
+      delete a.closedPause; // from now on only a host's Resume restarts the clock
+      Object.assign(a, { deviceId: null, lastSeen: null });
+    }
+    out.done++;
+  }
+  save(true);
+  return out;
+}
+
+// Removes a student who registered but never started (for duplicates or mistakes).
+export function deleteStudent(id) {
+  const s = studentById(id);
+  if (!s) fail('Student not found.', 404);
+  if (db.attempts.some((a) => a.studentId === id && (a.startedAt || a.archived))) fail('This student has already played, so they can’t be removed.');
+  db.students = db.students.filter((x) => x.id !== id);
+  db.attempts = db.attempts.filter((a) => a.studentId !== id);
+  db.requests = db.requests.filter((r) => r.studentId !== id);
+  save(true);
 }
 
 // ---------- attempts ----------
 export const currentAttempt = (studentId, eventId = activeEvent().id) =>
   db.attempts.find((a) => a.studentId === studentId && a.eventId === eventId && !a.archived);
 
-// A waiting attempt is only "in the lobby" while that student's lobby screen is open (it checks in every second).
-// Otherwise it is 'away' — e.g. a sibling on the same account who was picked earlier but isn't playing now.
+// A waiting attempt is only "in the lobby" while that student's lobby screen is open (it checks in every couple of seconds).
 export const inLobby = (a) => a.status === 'waiting' && Boolean(a.lastSeen) && now() - a.lastSeen < LOBBY_SEEN_MS;
 export const statusOf = (a) => (a.status === 'waiting' && !inLobby(a) ? 'away' : a.status);
+const online = (a) => Boolean(a?.lastSeen) && now() - a.lastSeen < ONLINE_MS;
 
 function ensureAttempt(student) {
   let a = currentAttempt(student.id);
@@ -119,34 +231,14 @@ function ensureAttempt(student) {
     a = { id: uid('at_'), studentId: student.id, eventId: activeEvent().id, status: 'waiting', createdAt: now(),
       startedAt: null, pausedAt: null, pausedMs: 0, endedAt: null, deviceId: null, lastSeen: null, acks: {}, rounds: {} };
     db.attempts.push(a);
+    student.lockedAt ??= now();
     save();
   }
   return a;
 }
 
-// A session (one signed-in device) locks onto one student. It cannot switch while that student's test is live.
-export const liveStudentOf = (email) => studentsOf(email).find((st) => { const a = currentAttempt(st.id); return a && LIVE.includes(a.status); });
-
-export function selectStudent(session, studentId) {
-  const s = studentById(studentId);
-  if (!s || s.email !== session.email) fail('Student not found.', 404);
-  session.studentId = s.id;
-  s.lockedAt ??= now();
-  ensureAttempt(s);
-  save(true);
-}
-
-export function releaseStudent(session) {
-  const a = session.studentId && currentAttempt(session.studentId);
-  if (a && LIVE.includes(a.status)) fail('The test has started — you can’t change the student now.', 409);
-  if (a?.status === 'waiting') Object.assign(a, { lastSeen: null, deviceId: null }); // left the lobby
-  session.studentId = null;
-  save();
-}
-
-function mine(session) {
-  const student = session.studentId && studentById(session.studentId);
-  if (!student) fail('Choose a student first.', 409, 'no-student');
+function mine(student) {
+  if (!student) fail('Please register first.', 401, 'no-student');
   return { student, attempt: ensureAttempt(student) };
 }
 
@@ -170,13 +262,12 @@ function spoken(text, a, p) {
   if (!text) return '';
   const secs = [1, 2, 3].map((r) => flowOf(a).find((x) => x.key === `r${r}`)?.sec ?? ROUND_MINUTES_RANGE.default * 60);
   if (p.type === 'brief') return text.replace(/\beight minutes?\b/i, minutesText(secs[p.round - 1]));
-  if (p.type === 'welcome') return secs.every((x) => x === secs[0]) ? text.replace(/\beight minutes each\b/i, `${minutesText(secs[0])} each`) : text.replace(/Three rounds, eight minutes each\./i, 'Three timed rounds.');
   return text;
 }
 
 export function phaseOf(a, t = now()) {
   if (a.status === 'waiting') return { type: 'waiting' };
-  if (a.status === 'stopped' || a.status === 'finished') return { type: 'done', round: 3 };
+  if (ENDED.includes(a.status)) return { type: 'done', round: 3 };
   const e = elapsed(a, t);
   let start = 0;
   const flow = flowOf(a);
@@ -192,11 +283,19 @@ export function phaseOf(a, t = now()) {
   return { type: 'done', round: 3 };
 }
 
-// ---------- question sets (same set for every player in an event + band) ----------
+// Ends the phase with this key right now (if it is the one running), so the next one starts.
+function endPhaseNow(a, key) {
+  a.flow ||= scheduleFor();
+  const entry = a.flow.find((p) => p.key === key), w = offsetOf(a, key), e = elapsed(a);
+  if (!entry || !w || e < w.start || e >= w.end) return false;
+  entry.sec = Math.max(0, (e - w.start) / 1000);
+  return true;
+}
+
+// ---------- question sets (shared by everyone in one run + grade band) ----------
 const setById = (id) => db.sets.find((s) => s.id === id);
 
 // A run is one group of students who were started together: they share one question set per band and round.
-// A later start can reuse that run's questions ("same") or begin a new run with freshly drawn ones ("new").
 export const runOf = (x) => x.runId || x.eventId; // attempts and sets from before runs existed count as one run
 
 export function runs() {
@@ -216,8 +315,8 @@ function bandPerformance(run, band, beforeRound) {
   for (const a of db.attempts) {
     if (runOf(a) !== run || a.archived || bandOf(studentById(a.studentId)?.grade) !== band) continue;
     for (let r = 1; r < beforeRound; r++) {
-      const parts = a.rounds[r]?.score?.parts || {};
-      for (const def of SCORE_PARTS[r]) if (parts[def.key]?.points != null) { got += parts[def.key].points; max += def.max; }
+      const rec = a.rounds[r], parts = rec?.score?.parts || {};
+      for (const def of partsFor(r, setById(rec?.setId)?.content)) if (parts[def.key]?.points != null) { got += parts[def.key].points; max += def.max; }
     }
   }
   return max ? got / max : null;
@@ -226,7 +325,7 @@ function bandPerformance(run, band, beforeRound) {
 function ensureSet(run, band, round) {
   let s = db.sets.find((x) => runOf(x) === run && x.band === band && x.round === round);
   if (!s) {
-    s = { id: uid('set_'), eventId: activeEvent().id, runId: run, ...drawRound(round, band, round === 1 ? null : bandPerformance(run, band, round), { r3Mode: r3Mode() }) };
+    s = { id: uid('set_'), eventId: activeEvent().id, runId: run, ...drawRound(round, band, round === 1 ? null : bandPerformance(run, band, round)) };
     db.sets.push(s);
     save(true);
   }
@@ -236,11 +335,64 @@ function ensureSet(run, band, round) {
 function openRound(a, r) {
   if (a.rounds[r]) return a.rounds[r];
   for (let k = 1; k < r; k++) finalize(a, k, 'time'); // earlier rounds count towards the adaptive draw
-  const student = studentById(a.studentId);
-  const set = ensureSet(a.redo?.round === r && a.redo.run ? a.redo.run : runOf(a), bandOf(student.grade), r);
+  const student = studentById(a.studentId), band = bandOf(student.grade);
+  const set = ensureSet(a.redo?.round === r && a.redo.run ? a.redo.run : runOf(a), band, r);
+  if (set.band !== band) fail('These questions belong to another grade band.', 500); // never serve another band's questions
   a.rounds[r] = { setId: set.id, openedAt: now(), draft: {}, savedAt: null, submittedAt: null, lifelines: { used: [], data: {} }, generations: [], score: null };
-  save();
+  save(true);
   return a.rounds[r];
+}
+
+// ---------- answers: what counts as answered, cleaning, saving ----------
+const filled = (v, n = 1) => String(v ?? '').trim().length >= n;
+
+// Every question of a round that has no answer yet: [{ id, label, step }] (step = the screen index in the round).
+export function missingOf(r, content, d = {}) {
+  const out = [];
+  if (r === 1) {
+    const items = [...content.items, content.boss];
+    items.forEach((q, i) => { if (!d.answers?.[q.id]) out.push({ id: q.id, label: i === items.length - 1 ? 'Final boss' : `Question ${i + 1}`, step: i }); });
+    if (!filled(d.bossWhy, 3)) out.push({ id: `${content.boss.id}:why`, label: 'Final boss — your reason', step: items.length - 1 });
+  } else if (r === 2 && content.v === 2) {
+    for (const q of content.case.questions) {
+      const ok = q.written ? filled(d.fix, 3) : Boolean(d.answers?.[q.n]);
+      if (!ok) out.push({ id: `s${q.n}`, label: `Step ${q.n} · ${{ spot: 'Spot the mistake', evidence: 'Choose the evidence', fix: 'Fix it' }[q.kind]}`, step: q.n - 1 });
+    }
+  } else if (r === 3 && content.v === 2) {
+    if (!filled(d.prompt, 3)) out.push({ id: 'prompt', label: 'Your prompt', step: 0 });
+    if (content.target.needsReasons && !filled(d.reasons, 3)) out.push({ id: 'reasons', label: 'Your two reasons', step: 1 });
+  }
+  return out;
+}
+
+function cleanMeta(m = {}) {
+  const ms = (v) => Math.max(0, Math.min(3_600_000, Math.round(Number(v) || 0)));
+  const t = Object.fromEntries(Object.entries(m.t || {}).slice(0, 40).map(([k, v]) => [clip(k, 60), ms(v)]));
+  const s = [...new Set((Array.isArray(m.s) ? m.s : []).slice(0, 40).map((k) => clip(k, 60)))];
+  return { t, s };
+}
+
+function cleanDraft(r, d = {}) {
+  const meta = cleanMeta(d._meta);
+  if (r === 1) {
+    return { answers: Object.fromEntries(Object.entries(d.answers || {}).slice(0, 20).map(([k, v]) => [clip(k, 60), clip(v, 2)])), bossWhy: clip(d.bossWhy), _meta: meta };
+  }
+  if (r === 2) {
+    return { answers: Object.fromEntries(['1', '2', '3'].filter((k) => d.answers?.[k]).map((k) => [k, clip(d.answers[k], 2)])), fix: clip(d.fix), _meta: meta };
+  }
+  return { prompt: clip(d.prompt, 3000), reasons: clip(d.reasons), finalPick: clip(d.finalPick, 2), _meta: meta };
+}
+
+function saveDraft(a, r, draft) {
+  const rec = a.rounds[r];
+  if (!rec) return { ok: false, reason: 'This round is not open.' };
+  if (rec.submittedAt) return { ok: false, reason: 'This round is already submitted.' };
+  if (a.status !== 'running') return { ok: false, reason: a.status === 'paused' ? 'Paused by the host.' : 'The test is not running.' };
+  if (elapsed(a) > roundWindow(a, r).end + SAVE_GRACE_MS) return { ok: false, reason: 'Time is up — changes after the deadline are not accepted.' };
+  rec.draft = cleanDraft(r, draft);
+  rec.savedAt = now();
+  save();
+  return { ok: true, savedAt: rec.savedAt };
 }
 
 // ---------- submitting & scoring ----------
@@ -253,6 +405,9 @@ function finalize(a, r, reason) {
   rec.submitReason = reason;
   const set = setById(rec.setId);
   const grade = studentById(a.studentId).grade;
+  const w = roundWindow(a, r);
+  rec.meta = { takenMs: w ? Math.max(0, Math.min(w.end - w.start, elapsed(a) - w.start)) : null, time: rec.draft?._meta?.t || {},
+    passed: rec.draft?._meta?.s || [], skipped: set?.content ? missingOf(r, set.content, rec.draft).map((m) => m.id) : [] };
   const res = scoreRound(r, set.content, rec.draft, grade, (later) => {
     for (const [k, v] of Object.entries(later)) if (rec.score.parts[k]?.by !== 'admin') rec.score.parts[k] = { ...v, by: v.note?.startsWith('AI') ? 'ai' : 'auto' };
     rec.score.pending = false;
@@ -262,7 +417,7 @@ function finalize(a, r, reason) {
   save(true);
 }
 
-// Runs every second: opens rounds on schedule, auto-submits at cutoff, finishes completed attempts.
+// Runs every second: closes rounds past their cutoff, opens rounds on schedule, finishes completed attempts.
 export function tick() {
   const t = now();
   const live = db.attempts.filter((a) => a.status === 'running' && !a.archived);
@@ -282,69 +437,50 @@ export function tick() {
   }
 }
 
-function cleanDraft(r, d = {}) {
-  if (r === 1) {
-    return { answers: Object.fromEntries(Object.entries(d.answers || {}).slice(0, 20).map(([k, v]) => [clip(k, 60), clip(v, 2)])), bossWhy: clip(d.bossWhy) };
-  }
-  if (r === 2) {
-    const rb = d.rebuild || {};
-    return { rebuild: { goal: clip(rb.goal, 4), audience: clip(rb.audience, 4), include: clip(rb.include, 4), format: clip(rb.format, 4) },
-      spot: { paragraph: clip(d.spot?.paragraph, 4), why: clip(d.spot?.why) }, match: { evidence: clip(d.match?.evidence, 4), why: clip(d.match?.why) },
-      repair: { text: clip(d.repair?.text), why: clip(d.repair?.why) } };
-  }
-  return { prompt: clip(d.prompt, 3000), finalPick: clip(d.finalPick, 2) };
-}
-
-function saveDraft(a, r, draft) {
-  const rec = a.rounds[r];
-  if (!rec) return { ok: false, reason: 'This round is not open.' };
-  if (rec.submittedAt) return { ok: false, reason: 'This round is already submitted.' };
-  if (a.status !== 'running') return { ok: false, reason: a.status === 'paused' ? 'Paused by the host.' : 'The test is not running.' };
-  if (elapsed(a) > roundWindow(a, r).end + SAVE_GRACE_MS) return { ok: false, reason: 'Time is up — changes after the deadline are not accepted.' };
-  rec.draft = cleanDraft(r, draft);
-  rec.savedAt = now();
-  save();
-  return { ok: true, savedAt: rec.savedAt };
-}
-
 function summary(a) {
   const rounds = [1, 2, 3].map((r) => {
     const rec = a.rounds[r];
     if (!rec?.submittedAt) return { round: r, name: ROUNDS[r].name, state: rec ? 'open' : 'not started', total: null, max: ROUNDS[r].max };
-    return { round: r, name: ROUNDS[r].name, state: rec.score?.pending ? 'pending' : 'scored', total: roundTotal(rec), max: ROUNDS[r].max };
+    return { round: r, name: ROUNDS[r].name, state: rec.score?.pending ? 'pending' : 'scored', total: roundTotal(rec), max: ROUNDS[r].max,
+      skipped: rec.meta?.skipped?.length || 0, takenMs: rec.meta?.takenMs ?? null };
   });
   return { rounds, total: rounds.reduce((s, r) => s + (r.total || 0), 0), pending: rounds.some((r) => r.state === 'pending') };
 }
+
+const feedbackOf = (a) => db.feedback.find((f) => f.attemptId === a.id);
 
 function stateFor(a, student, extra = {}) {
   const ph = phaseOf(a);
   const rec = ph.round ? a.rounds[ph.round] : null;
   return {
-    attemptId: a.id, scorecard: Boolean(approvedCardOf(student.id)),
-    student: { id: student.id, code: student.code, name: student.name, grade: student.grade, band: bandOf(student.grade), school: schoolName(student.schoolId) },
-    status: a.status, paused: Boolean(a.pausedAt), lock: a.acks._lock || null, phase: ph, acks: a.acks,
+    attemptId: a.id, scorecard: Boolean(approvedCardOf(student.id)), open: gate().open,
+    student: { id: student.id, code: student.code, name: student.name, grade: student.grade, band: bandOf(student.grade), school: schoolName(student.schoolId),
+      schoolId: student.schoolId, phone: student.phones?.[0] || '', email: student.email || '', gradeLocked: gradeLocked(student) },
+    status: a.status, paused: Boolean(a.pausedAt), closedPause: Boolean(a.closedPause), lock: a.acks._lock || null, phase: ph, acks: a.acks,
     roundSeconds: Object.fromEntries([1, 2, 3].map((r) => [r, flowOf(a).find((p) => p.key === `r${r}`)?.sec])), request: requestFor(a, student.id),
-    round: rec && { submitted: Boolean(rec.submittedAt), savedAt: rec.savedAt },
-    results: summary(a), final: activeEvent().finalPublished, redoRound: a.redo?.round || null, ...extra,
+    round: rec && { submitted: Boolean(rec.submittedAt), savedAt: rec.savedAt }, practice: a.practice || {},
+    feedback: Boolean(feedbackOf(a)), results: summary(a), final: activeEvent().finalPublished, redoRound: a.redo?.round || null, ...extra,
   };
 }
 
 // ---------- student API ----------
-export function playState(session) {
-  const { student, attempt } = mine(session);
+export function playState(student) {
+  requireOpen();
+  const { attempt } = mine(student);
   return stateFor(attempt, student);
 }
 
 function checkDevice(a, deviceId) {
   if (!deviceId) fail('Missing device id.');
-  if (a.deviceId && a.deviceId !== deviceId && LIVE.includes(a.status)) fail('This test is open on another device.', 409, 'device');
+  if (a.deviceId && a.deviceId !== deviceId && LIVE.includes(a.status)) fail('This test is open in another window.', 409, 'device');
   a.deviceId = deviceId;
   a.lastSeen = now();
 }
 
-export function sync(session, { deviceId, round, draft, ack }) {
-  const { student, attempt: a } = mine(session);
-  checkDevice(a, deviceId);
+export function sync(student, { deviceId, round, draft, ack }) {
+  requireOpen();
+  const { attempt: a } = mine(student);
+  checkDevice(a, String(deviceId || '').slice(0, 80));
   if (ack && /^[a-z0-9-]{1,20}$/.test(ack)) a.acks[ack] = a.acks[ack] || now();
   const ph = phaseOf(a);
   if (ph.type === 'round' && a.status === 'running') openRound(a, ph.round);
@@ -353,10 +489,41 @@ export function sync(session, { deviceId, round, draft, ack }) {
   return stateFor(a, student, { saved });
 }
 
+// Pressing "Start Round N" after the instructions and practice: the round clock starts now.
+export function startRound(student, { deviceId, round }) {
+  requireOpen();
+  const { attempt: a } = mine(student);
+  checkDevice(a, deviceId);
+  round = Number(round);
+  const ph = phaseOf(a);
+  if (a.status !== 'running') fail(a.status === 'paused' ? 'Your test is paused by your host.' : 'The test is not running.', 409);
+  if (ph.type === 'brief' && ph.round === round) {
+    a.acks[`r${round}`] ||= now();
+    endPhaseNow(a, ph.key);
+    openRound(a, round);
+  } else if (ph.type === 'round' && ph.round === round) {
+    a.acks[`r${round}`] ||= now(); // the round had already started by itself
+  } else fail('That round can’t start now.', 409);
+  save(true);
+  return stateFor(a, student);
+}
+
+// The practice question before a round (not scored) — kept so hosts can see who tried it.
+export function recordPractice(student, { round, answer, correct }) {
+  requireOpen();
+  const { attempt: a } = mine(student);
+  round = Number(round);
+  if (![1, 2, 3].includes(round)) fail('Unknown round.');
+  a.practice = { ...(a.practice || {}), [round]: { at: now(), answer: clip(typeof answer === 'string' ? answer : JSON.stringify(answer ?? ''), 600), correct: typeof correct === 'boolean' ? correct : null } };
+  save();
+  return { ok: true };
+}
+
 // A student who leaves the test window during a round is paused until the host lets them back in.
 // The record lives in `acks._lock` (the acks cell is already saved with the attempt).
-export function leaveWindow(session, deviceId) {
-  const { student, attempt: a } = mine(session);
+export function leaveWindow(student, deviceId) {
+  requireOpen();
+  const { attempt: a } = mine(student);
   checkDevice(a, deviceId);
   const ph = phaseOf(a);
   if (a.status === 'running' && ph.type === 'round' && !a.rounds[ph.round]?.submittedAt) {
@@ -368,8 +535,9 @@ export function leaveWindow(session, deviceId) {
   return stateFor(a, student);
 }
 
-export function lockRequest(session, note) {
-  const { student, attempt: a } = mine(session);
+export function lockRequest(student, note) {
+  requireOpen();
+  const { attempt: a } = mine(student);
   if (!a.acks._lock) fail('Nothing to ask the host about.', 409);
   Object.assign(a.acks._lock, { requested: true, note: clip(note, 300).trim(), requestedAt: now() });
   save(true);
@@ -381,7 +549,7 @@ export const pendingLocks = () => db.attempts.filter((a) => a.status === 'paused
 export function requestDeletion(email, { name, contact, code, details }) {
   name = clip(name, 80).trim(); contact = clip(contact, 120).trim(); code = clip(code, 20).trim(); details = clip(details, 600).trim();
   if (name.length < 2) fail('Please enter your name.');
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contact)) fail('Please enter an email address we can reply to.');
+  if (!EMAIL_RE.test(contact)) fail('Please enter an email address we can reply to.');
   if (db.deletions.filter((d) => d.status === 'open' && d.email === contact.toLowerCase()).length >= 3) fail('We already have your requests. We will be in touch soon.', 429);
   const r = { id: uid('dl_'), name, email: contact.toLowerCase(), code, details, at: now(), status: 'open', by: '', doneAt: null, account: email || '' };
   db.deletions.push(r);
@@ -397,31 +565,45 @@ export function closeDeletion(id, adminEmail) {
   save(true);
 }
 
-export function takeover(session, deviceId) {
-  const { student, attempt: a } = mine(session);
-  a.deviceId = deviceId;
+export function takeover(student, deviceId) {
+  requireOpen();
+  const { attempt: a } = mine(student);
+  a.deviceId = String(deviceId || '').slice(0, 80);
   a.lastSeen = now();
   save();
   return stateFor(a, student);
 }
 
-function liveRound(session, deviceId) {
-  const { student, attempt: a } = mine(session);
+function liveRound(student, deviceId) {
+  requireOpen();
+  const { attempt: a } = mine(student);
   checkDevice(a, deviceId);
   const ph = phaseOf(a);
   if (ph.type !== 'round') fail('No round is open right now.', 409);
   const rec = openRound(a, ph.round);
-  return { student, a, r: ph.round, rec, set: setById(rec.setId) };
+  return { a, r: ph.round, rec, set: setById(rec.setId) };
 }
 
-export function roundContent(session, deviceId) {
-  const { r, rec, set } = liveRound(session, deviceId);
-  return { round: r, view: publicView(set), draft: rec.draft, submitted: Boolean(rec.submittedAt), savedAt: rec.savedAt,
+// Question pictures are served through short-lived signed links, so only students who were given the question can load it.
+const linkExp = () => Math.ceil((now() + IMAGE_LINK_HOURS * 3600e3) / 3600e3) * 3600e3; // whole hours: the browser can cache the link
+export const imageLink = (id) => { const e = linkExp(); return `/api/img/${encodeURIComponent(id)}?e=${e}&s=${hmac(`img:${id}:${e}`)}`; };
+export function signedImage(id, e, s) {
+  if (!(Number(e) > now()) || !safeEq(String(s || ''), hmac(`img:${id}:${e}`))) return null;
+  return imageFor(id) || null;
+}
+
+export function roundContent(student, deviceId) {
+  const { r, rec, set } = liveRound(student, deviceId);
+  if (set.band !== bandOf(student.grade)) fail('These questions belong to another grade band.', 500);
+  const view = publicView(set);
+  if (view.imageId) view.image = imageLink(view.imageId);
+  delete view.imageId;
+  return { round: r, band: set.band, view, draft: rec.draft, submitted: Boolean(rec.submittedAt), savedAt: rec.savedAt,
     lifelines: rec.lifelines, generations: rec.generations.filter((g) => g.output), generationsLeft: R3_GENERATIONS - rec.generations.length };
 }
 
-export function useLifeline(session, { deviceId, id, target }) {
-  const { a, r, rec, set } = liveRound(session, deviceId);
+export function useLifeline(student, { deviceId, id, target }) {
+  const { a, r, rec, set } = liveRound(student, deviceId);
   if (rec.submittedAt) fail('This round is already submitted.');
   if (a.status !== 'running') fail('The test is paused.');
   if (!ROUNDS[r].lifelines.some((l) => l.id === id)) fail('Unknown lifeline.');
@@ -432,43 +614,54 @@ export function useLifeline(session, { deviceId, id, target }) {
     const q = c.items.find((x) => x.id === target) || (c.boss.id === target ? c.boss : null);
     if (!q) fail('Choose a question first.');
     if (id === 'fifty') {
-      if (q.options.length < 4) fail('50–50 works on four-option questions only.');
+      if (q.options.length < 3) fail('50–50 works on questions with three or more choices.');
       let hide = q.hide.filter((h) => h !== q.key && q.options.some((o) => o.id === h));
       if (hide.length < 2) hide = q.options.map((o) => o.id).filter((o) => o !== q.key).sort(() => crypto.randomInt(3) - 1).slice(0, 2);
-      data = { target, hide: hide.slice(0, 2) };
+      data = { target, hide: hide.slice(0, Math.min(2, q.options.length - 2)) };
     } else data = { target, text: q.clue };
   } else if (r === 2) {
-    if (id === 'compass') data = { text: c.case.compass };
-    else {
-      const p = c.case.puzzles[target];
-      if (!p) fail('Choose a puzzle first.');
-      data = { target, text: p.clue };
-    }
-  } else data = { text: id === 'goal' ? c.target.goalLens : c.target.structureScan };
+    const q = c.case.questions.find((x) => x.n === Number(target));
+    if (!q) fail('Choose a step first.');
+    if (id === 'compass') {
+      if (q.options) {
+        const wrong = q.options.map((o) => o.id).filter((o) => o !== q.key);
+        data = { target: q.n, hide: [wrong[crypto.randomInt(wrong.length)]] };
+      } else data = { target: q.n, text: R2_HINTS.fixWritten };
+    } else data = { target: q.n, text: q.written ? R2_HINTS.fixWritten : R2_HINTS[q.kind] };
+  } else data = { text: id === 'goal' ? c.target.goalLens || R3_LENS.goal : c.target.structureScan || R3_LENS.structure };
   rec.lifelines.used.push(id);
   rec.lifelines.data[id] = data;
   save();
   return rec.lifelines;
 }
 
-export function submitRound(session, { deviceId, round, draft }) {
-  const { a, r, rec, student } = liveRound(session, deviceId);
+// Submitting early is allowed only when every question is answered; when the time runs out, whatever is saved is submitted.
+export function submitRound(student, { deviceId, round, draft }) {
+  const { a, r, rec, set } = liveRound(student, deviceId);
   if (Number(round) !== r) fail('That round is no longer open.', 409);
+  if (rec.submittedAt) return stateFor(a, student);
   if (draft) {
     const res = saveDraft(a, r, draft);
-    if (!res.ok && !rec.submittedAt) fail(res.reason, 409);
+    if (!res.ok) fail(res.reason, 409);
+  }
+  const missing = missingOf(r, set.content, rec.draft);
+  const w = roundWindow(a, r);
+  if (missing.length && w && elapsed(a) < w.end) {
+    throw Object.assign(new GameError(`Answer every question before you submit. Still to do: ${missing.map((m) => m.label).join(', ')}.`, 409, 'incomplete'), { missing });
   }
   finalize(a, r, 'submitted');
+  endPhaseNow(a, `r${r}`); // the student moves straight on to the next round's instructions
+  save(true);
   return stateFor(a, student);
 }
 
-export async function generateR3(session, { deviceId, prompt }) {
-  const { a, r, rec, student } = liveRound(session, deviceId);
+export async function generateR3(student, { deviceId, prompt }) {
+  const { a, r, rec, set } = liveRound(student, deviceId);
   if (r !== 3 || rec.submittedAt || a.status !== 'running') fail('The AI tool is only available during Round 3.');
-  if (setById(rec.setId).content.target?.type === 'image') fail('This target is a picture, so there is no AI tool here. Write your prompt.');
+  if (set.content.target?.type === 'image') fail('This target is a picture, so there is no AI tool here. Write your prompt.');
   prompt = clip(prompt, 3000).trim();
   if (prompt.length < 5) fail('Write your prompt first.');
-  if (rec.generations.length >= R3_GENERATIONS) fail(`You have used both AI generations.`);
+  if (rec.generations.length >= R3_GENERATIONS) fail('You have used both AI generations.');
   const g = { prompt, output: '', at: now() };
   rec.generations.push(g); // reserve the slot before the slow call
   try {
@@ -481,10 +674,25 @@ export async function generateR3(session, { deviceId, prompt }) {
   return { generations: rec.generations, generationsLeft: R3_GENERATIONS - rec.generations.length };
 }
 
+// The smiley rating at the end (1–5) with an optional comment. One per attempt; sending again replaces it.
+export function submitFeedback(student, { rating, text }) {
+  requireOpen();
+  const { attempt: a } = mine(student);
+  if (!ENDED.includes(a.status) && !['finish', 'done'].includes(phaseOf(a).type)) fail('You can leave feedback when you have finished.', 409); // 'done' = finished, before the next clock tick marks it
+  rating = Math.round(Number(rating));
+  if (!RATINGS.some((x) => x.value === rating)) fail('Choose a face first.');
+  const prev = feedbackOf(a);
+  const rec = { id: prev?.id || uid('fb_'), studentId: student.id, attemptId: a.id, rating, text: clip(text, 1000).trim(), at: now() };
+  if (prev) Object.assign(prev, rec); else db.feedback.push(rec);
+  save(true);
+  return stateFor(a, student);
+}
+
 // ---------- admin controls ----------
 export function control(action, studentIds, { questions } = {}) {
   const ev = activeEvent();
   const out = { done: 0, skipped: 0, errors: [] };
+  if (action === 'start' && !gate().open) fail('Promptathon is closed. Open it first (top of the dashboard), then start.', 409);
   let run = null; // everyone started by one press of Start shares this run
   const t = now();
   for (const id of new Set(studentIds)) {
@@ -494,23 +702,25 @@ export function control(action, studentIds, { questions } = {}) {
     if (action === 'start' && a.status === 'waiting' && a.redo && inLobby(a)) { // a round reattempt: just that round's briefing and round
       const r = a.redo.round;
       a.redo.run = questions === 'new' ? uid('run_') : null; // 'same' = the questions this student had before
-      Object.assign(a, { status: 'running', startedAt: t, pausedAt: null, pausedMs: 0, flow: getFlow().filter((p) => p.round === r && (p.type === 'brief' || p.type === 'round'))
-        .map(({ key, type, round, sec, title, script }) => ({ key, type, round, sec: type === 'round' ? roundMinutes()[round] * 60 : phaseSeconds()[type], title, script })) });
+      Object.assign(a, { status: 'running', startedAt: t, pausedAt: null, pausedMs: 0, flow: scheduleFor((p) => p.round === r && (p.type === 'brief' || p.type === 'round')) });
     } else if (action === 'start' && a.status === 'waiting' && inLobby(a)) {
       const band = bandOf(s.grade);
-      const problems = bandProblems(band, r3Mode());
+      const problems = bandProblems(band);
       if (problems.length) { out.errors.push(`${BANDS.find((b) => b.id === band).label}: ${problems.join(', ')}`); continue; }
       run ||= (questions === 'same' && runs().at(-1)?.id) || uid('run_');
       ensureSet(run, band, 1);
-      Object.assign(a, { status: 'running', runId: run, startedAt: t, pausedAt: null, pausedMs: 0, flow: getFlow().map(({ key, type, round, sec, title, script }) => ({ key, type, round, sec: type === 'round' ? roundMinutes()[round] * 60 : phaseSeconds()[type], title, script })) });
+      Object.assign(a, { status: 'running', runId: run, startedAt: t, pausedAt: null, pausedMs: 0, flow: scheduleFor() });
     } else if (action === 'pause' && a.status === 'running') {
       Object.assign(a, { status: 'paused', pausedAt: t });
     } else if (action === 'resume' && a.status === 'paused') {
+      if (!s.loggedIn) { out.skipped++; out.errors.push('Players who are logged out stay paused until they join again.'); continue; }
       Object.assign(a, { status: 'running', pausedMs: a.pausedMs + (t - a.pausedAt), pausedAt: null });
       delete a.acks._lock;
+      delete a.closedPause;
     } else if (action === 'stop' && LIVE.includes(a.status)) {
       if (a.pausedAt) { a.pausedMs += t - a.pausedAt; a.pausedAt = null; }
       for (const r of [1, 2, 3]) finalize(a, r, 'stopped');
+      delete a.closedPause;
       Object.assign(a, { status: 'stopped', endedAt: t });
     } else { out.skipped++; continue; }
     out.done++;
@@ -528,9 +738,9 @@ export function enableReattempt(studentId, round = 0) {
   if (a && LIVE.includes(a.status)) fail('Stop this student’s test before enabling a reattempt.');
   if (round) {
     if (![1, 2, 3].includes(round)) fail('Choose a round.');
-    if (!a || !['finished', 'stopped'].includes(a.status)) fail('A round can be reopened only after the student’s test has ended.');
+    if (!a || !ENDED.includes(a.status)) fail('A round can be reopened only after the student’s test has ended.');
     const old = a.rounds[round];
-    const history = [...(a.redo?.history || []), { round, at: now(), prev: old ? { setId: old.setId, submittedAt: old.submittedAt, draft: old.draft, score: old.score } : null }];
+    const history = [...(a.redo?.history || []), { round, at: now(), prev: old ? { setId: old.setId, submittedAt: old.submittedAt, draft: old.draft, score: old.score, meta: old.meta } : null }];
     delete a.rounds[round];
     delete a.acks[`r${round}`];
     a.redo = { round, run: null, history };
@@ -566,13 +776,15 @@ function requestFor(a, studentId) {
     : latestRequest(studentId, (r) => r.attemptId === a.id));
 }
 
-export function requestReattempt(session, note) {
-  const { student, attempt: a } = mine(session);
-  if (!['finished', 'stopped'].includes(a.status)) fail('You can ask for another attempt once your test has ended.', 409);
+export function requestReattempt(student, note) {
+  requireOpen();
+  const { attempt: a } = mine(student);
+  if (!ENDED.includes(a.status)) fail('You can ask for another attempt once your test has ended.', 409);
   if (db.requests.some((r) => r.studentId === student.id && r.status === 'pending')) fail('Your request is already waiting for the host.', 409);
   db.requests.push({ id: uid('rq_'), studentId: student.id, attemptId: a.id, note: clip(note, 500).trim(), status: 'pending',
     createdAt: now(), decidedAt: null, decidedBy: '', reply: '' });
   save(true);
+  return stateFor(a, student);
 }
 
 export const pendingRequests = () => db.requests.filter((r) => r.status === 'pending').length;
@@ -590,12 +802,12 @@ export function decideRequest(id, approve, reply, adminEmail, round = 0) {
   if (!r) fail('Request not found.', 404);
   if (r.status !== 'pending') fail('This request has already been answered.', 409);
   const current = currentAttempt(r.studentId);
-  if (approve && current?.id === r.attemptId && ['finished', 'stopped'].includes(current.status)) enableReattempt(r.studentId, round); // otherwise a reattempt was already opened for them
+  if (approve && current?.id === r.attemptId && ENDED.includes(current.status)) enableReattempt(r.studentId, round); // otherwise a reattempt was already opened for them
   Object.assign(r, { status: approve ? 'approved' : 'rejected', decidedAt: now(), decidedBy: adminEmail, reply: clip(reply, 500).trim() });
   save(true);
 }
 
-// ---------- add time to / end a round, briefing or break (live students only) ----------
+// ---------- add time to / end a round or the instructions (live students only) ----------
 // target: 'current' (whatever each student is on now) or a round number 1–3.
 export function phaseTime(action, studentIds, { target = 'current', seconds = 0 } = {}) {
   const ev = activeEvent();
@@ -607,7 +819,7 @@ export function phaseTime(action, studentIds, { target = 'current', seconds = 0 
   for (const id of new Set(studentIds)) {
     const a = currentAttempt(id, ev.id);
     if (!a || !LIVE.includes(a.status)) { out.skipped++; continue; }
-    a.flow ||= getFlow().map((p) => ({ ...p }));
+    a.flow ||= scheduleFor();
     const ph = phaseOf(a);
     const entry = target === 'current' ? (ph.index != null ? a.flow[ph.index] : null) : a.flow.find((p) => p.key === `r${target}`);
     if (!entry) { out.skipped++; continue; }
@@ -631,7 +843,7 @@ export function setScores(attemptId, round, parts) {
   const a = db.attempts.find((x) => x.id === attemptId);
   const rec = a?.rounds[round];
   if (!rec?.score) fail('This round has not been submitted yet.');
-  for (const def of SCORE_PARTS[round]) {
+  for (const def of partsFor(round, setById(rec.setId)?.content)) {
     if (parts[def.key] == null || parts[def.key] === '') continue;
     const points = Math.max(0, Math.min(def.max, Math.round(Number(parts[def.key]) || 0)));
     rec.score.parts[def.key] = { ...rec.score.parts[def.key], points, by: 'admin' };
@@ -641,22 +853,13 @@ export function setScores(attemptId, round, parts) {
   save(true);
 }
 
-// A target picture is served only to the student it was drawn for (or to an admin).
-export function targetImage(session, imageId) {
-  const student = session.studentId && studentById(session.studentId);
-  const a = student && currentAttempt(student.id);
-  const rec = a?.rounds[3];
-  if (!rec || setById(rec.setId)?.content.target?.imageId !== imageId) fail('Not available.', 404);
-  return imageFor(imageId);
-}
-
 // ---------- score cards ----------
 // A card is computed from the saved answers; the admin can edit any field, then approve it. Only approved cards reach students.
 const attemptById = (id) => db.attempts.find((x) => x.id === id);
 export const attemptCard = (attemptId) => { const a = attemptById(attemptId); return a && scorecard(a); };
 export function cardHtml(attemptId) {
   const card = attemptCard(attemptId);
-  if (!card) fail('There is no score card for this attempt yet — it needs at least one scored round from the current question bank.', 404);
+  if (!card) fail('There is no score card for this attempt yet — it needs at least one scored round.', 404);
   return renderScorecard(card);
 }
 export { scorecards };
@@ -703,46 +906,51 @@ export function setCardApproval(attemptIds, approved, by) {
   return out;
 }
 
-// Rows for the admin's Score cards tab.
-export const cardRows = () => scorecards().map((c) => ({ attemptId: c.attemptId, studentId: c.studentId, name: c.name, code: c.code, grade: c.grade, school: c.school,
-  email: c.email, total: c.total, status: c.status, edited: c.edited, approved: c.approved, emailedAt: c.emailedAt, emailedTo: c.emailedTo, changedSinceEmailed: c.changedSinceEmailed,
-  archived: c.archived, run: runs().find((r) => r.id === c.run)?.number ?? '' }));
+// Rows for the admin's Score cards tab (filters: school, grade, run/session, status).
+export const cardRows = () => {
+  const rs = runs();
+  return scorecards().map((c) => ({ attemptId: c.attemptId, studentId: c.studentId, name: c.name, code: c.code, grade: c.grade, school: c.school,
+    email: c.email, total: c.total, status: c.status, edited: c.edited, approved: c.approved, emailedAt: c.emailedAt, emailedTo: c.emailedTo, changedSinceEmailed: c.changedSinceEmailed,
+    archived: c.archived, run: rs.find((r) => r.id === c.run)?.number ?? '' }));
+};
 
 const approvedCardOf = (studentId) => db.attempts.filter((x) => x.studentId === studentId).sort((x, y) => y.createdAt - x.createdAt).map(scorecard).find((c) => c?.approved) || null;
-export const studentCard = (session) => (session.studentId ? approvedCardOf(session.studentId) : null);
+export const studentCard = (student) => (student ? approvedCardOf(student.id) : null);
 
 // ---------- reporting ----------
-const optText = (q, id) => (id ? `${id}. ${q.options.find((o) => o.id === id)?.text || ''}` : '—');
+const optText = (q, id) => (id ? `${id}. ${q.options?.find((o) => o.id === id)?.text || ''}` : '—');
+const secs = (ms) => (ms == null ? null : Math.round(ms / 1000));
 
 export function answerDetail(a) {
   const out = [];
   for (const r of [1, 2, 3]) {
     const rec = a.rounds[r];
     if (!rec) continue;
-    const c = setById(rec.setId).content, d = rec.draft || {}, p = rec.score?.parts || {};
+    const c = setById(rec.setId)?.content;
+    if (!c) continue;
+    const d = rec.draft || {}, p = rec.score?.parts || {}, meta = rec.meta || {};
     const pts = (k) => p[k]?.points ?? null;
-    const row = (id, part, question, answer, correct, points, max, extra = {}) => out.push({ round: r, id, part, question, answer: answer || '—', correct, points, max, by: p[part]?.by || '', note: p[part]?.note || '', ...extra });
+    const row = (id, item, part, question, answer, correct, points, max, extra = {}) => out.push({ round: r, id, part, question, answer: answer || '—', correct, points, max,
+      by: p[part]?.by || '', note: p[part]?.note || '', timeSec: item ? secs(meta.time?.[item] ?? d._meta?.t?.[item]) : null,
+      skipped: item ? (meta.skipped || []).includes(item) : false, passed: item ? (meta.passed || d._meta?.s || []).includes(item) : false, ...extra });
     if (r === 1) {
-      for (const q of c.items) row(q.id, 'quick', q.question, optText(q, d.answers?.[q.id]), optText(q, q.key), p.quick?.items?.[q.id] ?? null, 2,
+      for (const q of c.items) row(q.id, q.id, 'quick', q.question, optText(q, d.answers?.[q.id]), optText(q, q.key), p.quick?.items?.[q.id] ?? null, 2,
         { lifeline: Object.values(rec.lifelines.data).some((l) => l.target === q.id) });
-      row(c.boss.id, 'bossChoice', c.boss.question, optText(c.boss, d.answers?.[c.boss.id]), optText(c.boss, c.boss.key), pts('bossChoice'), 2);
-      row(`${c.boss.id} · why`, 'bossWhy', 'Explain why it is the best choice', d.bossWhy, c.boss.explanation, pts('bossWhy'), 2);
-    } else if (r === 2) {
-      const k = c.case, pz = k.puzzles;
-      row(`${k.id} · rebuild`, 'rebuild', pz.rebuild.task, ['goal', 'audience', 'include', 'format'].map((s) => d.rebuild?.[s] || '?').join(' → '), pz.rebuild.order.join(' → '), pts('rebuild'), 5);
-      row(`${k.id} · spot`, 'spotId', pz.spot.task, d.spot?.paragraph, `${pz.spot.paragraph}: ${pz.spot.claim}`, pts('spotId'), 2);
-      row(`${k.id} · spot why`, 'spotWhy', 'Explain the problem', d.spot?.why, pz.spot.reason, pts('spotWhy'), 3);
-      row(`${k.id} · match`, 'matchId', pz.match.task, d.match?.evidence, pz.match.evidenceId, pts('matchId'), 2);
-      row(`${k.id} · match why`, 'matchWhy', 'Explain how it helps', d.match?.why, pz.match.connection, pts('matchWhy'), 3);
-      row(`${k.id} · repair`, 'repairFix', pz.repair.task, d.repair?.text, pz.repair.expected, pts('repairFix'), 3);
-      row(`${k.id} · repair why`, 'repairWhy', 'Why your fix works', d.repair?.why, pz.repair.rubric, pts('repairWhy'), 2);
+      row(c.boss.id, c.boss.id, 'bossChoice', c.boss.question, optText(c.boss, d.answers?.[c.boss.id]), optText(c.boss, c.boss.key), pts('bossChoice'), 2);
+      row(`${c.boss.id} · why`, `${c.boss.id}:why`, 'bossWhy', 'Explain why it is the best choice', d.bossWhy, c.boss.explanation, pts('bossWhy'), 2);
+    } else if (r === 2 && c.v === 2) {
+      for (const q of c.case.questions) {
+        row(`${c.case.id} · step ${q.n}`, `s${q.n}`, q.kind, `${c.case.title}: ${q.question}`, q.written ? d.fix : optText(q, d.answers?.[q.n]), q.written ? q.sample : optText(q, q.key), pts(q.kind), q.max,
+          { lifeline: Object.values(rec.lifelines.data).some((l) => Number(l.target) === q.n) });
+      }
+    } else if (r === 2) { // a case from the earlier bank
+      row(`${c.case.id}`, '', 'rebuild', c.case.title, '(earlier question format)', '', roundTotal(rec), 20);
+    } else if (c.v === 2) {
+      const t = c.target, promptPts = partsFor(3, c).filter((x) => x.key !== 'reasons').reduce((s, x) => (pts(x.key) == null ? s : (s ?? 0) + pts(x.key)), null);
+      row(`${t.id} · prompt`, 'prompt', 'purpose', `${t.title}: ${t.question}`, d.prompt, t.reference, promptPts, t.needsReasons ? 16 : 20);
+      if (t.needsReasons) row(`${t.id} · reasons`, 'reasons', 'reasons', 'Two short reasons', d.reasons, '', pts('reasons'), 4);
     } else {
-      const t = c.target;
-      const promptPts = ['purpose', 'content', 'format', 'clarity'].reduce((s, k) => (pts(k) == null ? s : (s ?? 0) + pts(k)), null);
-      row(`${t.id} · prompt`, 'purpose', `Write a prompt for: ${t.title}`, d.prompt, t.example, promptPts, 20);
-      rec.generations.forEach((g, i) => row(`${t.id} · AI ${i + 1}`, '', `AI generation ${i + 1}: ${g.prompt}`, g.output, '', null, null));
-      const pick = rec.generations[Number(d.finalPick)];
-      if (pick) row(`${t.id} · final`, '', 'Chosen final creation (AI result)', pick.output, '', null, null);
+      row(`${c.target.id} · prompt`, '', 'purpose', `Write a prompt for: ${c.target.title}`, d.prompt, c.target.example, roundTotal(rec), 20);
     }
   }
   return out;
@@ -752,7 +960,7 @@ function resultRows(ev = activeEvent()) {
   return db.attempts.filter((a) => a.eventId === ev.id && !a.archived && a.status !== 'waiting' && studentById(a.studentId)).map((a) => {
     const s = studentById(a.studentId), sum = summary(a);
     const [r1, r2, r3] = sum.rounds.map((x) => x.total);
-    return { a, s, run: runOf(a), band: bandOf(s.grade), school: schoolName(s.schoolId), r1, r2, r3, total: sum.total, pending: sum.pending,
+    return { a, s, run: runOf(a), band: bandOf(s.grade), school: schoolName(s.schoolId), r1, r2, r3, total: sum.total, pending: sum.pending, sum,
       content: a.rounds[3]?.score?.parts?.content?.points ?? 0, reviewed: [1, 2, 3].every((r) => !a.rounds[r] || a.rounds[r].reviewedAt) };
   });
 }
@@ -776,33 +984,71 @@ export function leaderboard({ band, schoolId, runId } = {}) {
   return { band, run: runId || '', runs: runs(), event: ev.name, final: ev.finalPublished, rows: [...ranked, ...rows.filter((x) => x.pending)].map(shape), awards };
 }
 
+// ---------- the admin's student list (registrations: contact details, status, feedback) ----------
+export function studentRows() {
+  const ev = activeEvent();
+  return db.students.map((s) => {
+    const a = currentAttempt(s.id, ev.id), ph = a ? phaseOf(a) : null, fb = a && feedbackOf(a);
+    return { id: s.id, code: s.code, name: s.name, email: s.email || '', phones: s.phones || [], grade: s.grade, band: bandOf(s.grade), schoolId: s.schoolId,
+      createdAt: s.createdAt, loggedIn: Boolean(s.loggedIn), attemptId: a?.id, lock: a?.acks?._lock || null, closedPause: Boolean(a?.closedPause), online: online(a),
+      status: a ? statusOf(a) : 'not joined', redoRound: a?.status === 'waiting' ? a.redo?.round || null : null,
+      phase: ph && { type: ph.type, round: ph.round, title: ph.title, remainingMs: ph.remainingMs }, practice: Object.keys(a?.practice || {}).map(Number),
+      scores: a && [1, 2, 3].map((r) => {
+        const rec = a.rounds[r];
+        return rec?.score ? { total: Object.values(rec.score.parts).reduce((t, p) => t + (p.points || 0), 0), pending: rec.score.pending, skipped: rec.meta?.skipped?.length || 0 } : null;
+      }),
+      feedback: fb ? { rating: fb.rating, text: fb.text } : null,
+      reattempts: db.attempts.filter((x) => x.studentId === s.id && x.eventId === ev.id && x.archived).length };
+  });
+}
+
+export function feedbackList() {
+  return db.feedback.map((f) => {
+    const s = studentById(f.studentId);
+    return { id: f.id, rating: f.rating, text: f.text, at: f.at, student: s ? { id: s.id, name: s.name, code: s.code, grade: s.grade, school: schoolName(s.schoolId), schoolId: s.schoolId } : null };
+  }).filter((f) => f.student).sort((x, y) => y.at - x.at);
+}
+
 export function analytics() {
   const ev = activeEvent();
   const attempts = db.attempts.filter((a) => a.eventId === ev.id && !a.archived);
   const rows = resultRows(ev);
-  const done = rows.filter((x) => ['finished', 'stopped'].includes(x.a.status) && !x.pending);
+  const done = rows.filter((x) => ENDED.includes(x.a.status) && !x.pending);
   const avg = (xs) => (xs.length ? Math.round((xs.reduce((s, v) => s + v, 0) / xs.length) * 10) / 10 : null);
   const items = [];
   for (const set of db.sets.filter((s) => s.eventId === ev.id && s.round === 1)) {
     for (const q of [...set.content.items, set.content.boss]) {
       const recs = attempts.map((a) => a.rounds[1]).filter((r) => r?.setId === set.id && r.submittedAt);
-      const answered = recs.filter((r) => r.draft.answers?.[q.id]).length;
       const correct = recs.filter((r) => r.draft.answers?.[q.id] === q.key).length;
-      const lifelines = recs.filter((r) => Object.values(r.lifelines.data).some((l) => l.target === q.id)).length;
-      items.push({ band: set.band, id: q.id, skill: q.skill || 'boss', difficulty: q.difficulty, attempts: recs.length, answered, correct,
-        pctCorrect: recs.length ? Math.round((correct / recs.length) * 100) : null, lifelines });
+      items.push({ band: set.band, id: q.id, skill: q.skill || 'boss', difficulty: q.difficulty, attempts: recs.length, answered: recs.filter((r) => r.draft.answers?.[q.id]).length, correct,
+        pctCorrect: recs.length ? Math.round((correct / recs.length) * 100) : null, lifelines: recs.filter((r) => Object.values(r.lifelines.data).some((l) => l.target === q.id)).length,
+        avgSec: avg(recs.map((r) => secs(r.meta?.time?.[q.id])).filter((v) => v != null)) });
+    }
+  }
+  const steps = [];
+  for (const set of db.sets.filter((s) => s.eventId === ev.id && s.round === 2 && s.content.v === 2)) {
+    const recs = attempts.map((a) => a.rounds[2]).filter((r) => r?.setId === set.id && r.submittedAt);
+    if (!recs.length) continue;
+    for (const q of set.content.case.questions) {
+      const scored = recs.map((r) => r.score?.parts?.[q.kind]?.points).filter((v) => v != null);
+      steps.push({ band: set.band, id: `${set.content.case.id} · ${q.n}`, kind: q.kind, written: q.written, attempts: recs.length,
+        pct: scored.length ? Math.round((scored.reduce((s, v) => s + v, 0) / (scored.length * q.max)) * 100) : null,
+        avgSec: avg(recs.map((r) => secs(r.meta?.time?.[`s${q.n}`])).filter((v) => v != null)) });
     }
   }
   const partAvgs = Object.fromEntries([1, 2, 3].map((r) => [r, SCORE_PARTS[r].map((def) => ({ ...def,
-    avg: avg(attempts.map((a) => a.rounds[r]?.score?.parts?.[def.key]?.points).filter((v) => v != null)) }))]));
+    avg: avg(attempts.filter((a) => setById(a.rounds[r]?.setId)?.content?.v === 2 || r === 1).map((a) => a.rounds[r]?.score?.parts?.[def.key]?.points).filter((v) => v != null)) }))]));
   const lifelineUse = {};
   for (const a of attempts) for (const r of [1, 2, 3]) for (const id of a.rounds[r]?.lifelines?.used || []) lifelineUse[id] = (lifelineUse[id] || 0) + 1;
+  const fb = feedbackList();
   return {
     event: ev.name,
     kpis: { registered: db.students.length, lobby: attempts.filter(inLobby).length,
-      live: attempts.filter((a) => LIVE.includes(a.status)).length, finished: rows.filter((x) => ['finished', 'stopped'].includes(x.a.status)).length,
-      avgTotal: avg(done.map((x) => x.total)) },
-    rounds: [1, 2, 3].map((r) => ({ round: r, name: ROUNDS[r].name, max: 20, avg: avg(rows.map((x) => x[`r${r}`]).filter((v) => v != null)) })),
+      live: attempts.filter((a) => LIVE.includes(a.status)).length, finished: rows.filter((x) => ENDED.includes(x.a.status)).length,
+      avgTotal: avg(done.map((x) => x.total)), feedback: fb.length, avgRating: avg(fb.map((f) => f.rating)) },
+    rounds: [1, 2, 3].map((r) => ({ round: r, name: ROUNDS[r].name, max: 20, avg: avg(rows.map((x) => x[`r${r}`]).filter((v) => v != null)),
+      avgMinutes: avg(rows.map((x) => x.sum.rounds[r - 1].takenMs).filter((v) => v != null).map((v) => v / 60000)),
+      skipped: rows.reduce((s, x) => s + (x.sum.rounds[r - 1].skipped || 0), 0) })),
     distribution: [0, 10, 20, 30, 40, 50].map((lo) => ({ label: `${lo}–${lo === 50 ? 60 : lo + 9}`, count: done.filter((x) => x.total >= lo && (lo === 50 ? x.total <= 60 : x.total < lo + 10)).length })),
     schools: db.schools.map((sc) => {
       const mineRows = done.filter((x) => x.s.schoolId === sc.id);
@@ -810,49 +1056,36 @@ export function analytics() {
     }),
     bands: BANDS.map((b) => ({ label: b.label, finished: done.filter((x) => x.band === b.id).length, avg: avg(done.filter((x) => x.band === b.id).map((x) => x.total)),
       levels: db.sets.filter((s) => s.eventId === ev.id && s.band === b.id).map((s) => `R${s.round}: ${s.level}`).join(', ') })),
-    parts: partAvgs, items, lifelineUse,
+    ratings: RATINGS.map((r) => ({ ...r, count: fb.filter((f) => f.rating === r.value).length })),
+    parts: partAvgs, items, steps, lifelineUse,
   };
 }
 
-// Tabs used for both the Google Sheet mirror and the Excel download.
+// Tabs used for the Google Sheet's readable Results / Answers tabs.
 export function reportTabs() {
   const ev = activeEvent();
   const tabs = {
-    Results: [['Event', 'Code', 'Name', 'School', 'Grade', 'Band', 'Status', 'Started', 'Ended', 'R1 AI Blitz', 'R2 AI Case', 'R3 Creator', 'Total /60', 'Scoring', 'Reviewed', 'Run']],
-    Answers: [['Event', 'School', 'Band', 'Grade', 'Code', 'Name', 'Round', 'Question / part ID', 'Question', 'Student answer', 'Correct answer / reference', 'Points', 'Max', 'Marked by', 'Marker note']],
-    Students: [['Code', 'Name', 'Grade', 'Band', 'School', 'Account email', 'Created', 'Locked in']],
-    Schools: [['School ID', 'Name', 'Students']],
-    'Question Sets': [['Event', 'Band', 'Round', 'Difficulty basis', 'Band avg before draw', 'Item IDs', 'Bank version', 'Seed', 'Drawn at']],
-    Admins: [['Email', 'Added by', 'Added at']],
-    Scorecards: [['Code', 'Name', 'Grade', 'School', 'Status', 'Total /60', 'Round 1', 'Round 2', 'Round 3', ...Object.keys(getSkillsList()).map((id) => `${id} %`), 'Strength', 'Next step']],
-    'Reattempt Requests': [['Code', 'Name', 'School', 'Student note', 'Status', 'Host reply', 'Requested', 'Decided', 'Decided by']],
+    Results: [['Event', 'Code', 'Name', 'School', 'Grade', 'Band', 'Status', 'Started', 'Ended', 'R1 AI Blitz', 'R2 AI Case', 'R3 Creator', 'Total /60', 'Scoring', 'Reviewed', 'Run',
+      'R1 minutes', 'R2 minutes', 'R3 minutes', 'Skipped questions', 'Feedback (1–5)', 'Feedback comment']],
+    Answers: [['Event', 'School', 'Band', 'Grade', 'Code', 'Name', 'Round', 'Question / part ID', 'Question', 'Student answer', 'Correct answer / reference', 'Points', 'Max', 'Marked by', 'Marker note',
+      'Time on question (s)', 'Skipped', 'Passed over']],
   };
+  const rs = runs();
   for (const x of resultRows(ev)) {
+    const fb = feedbackOf(x.a), mins = x.sum.rounds.map((r) => (r.takenMs == null ? '' : Math.round(r.takenMs / 6000) / 10));
     tabs.Results.push([ev.name, x.s.code, x.s.name, x.school, x.s.grade, x.band, x.a.status, iso(x.a.startedAt), iso(x.a.endedAt),
-      x.r1 ?? '', x.r2 ?? '', x.r3 ?? '', x.total, x.pending ? 'pending' : ev.finalPublished ? 'final' : 'provisional', x.reviewed ? 'yes' : 'no', runs().find((r) => r.id === x.run)?.number ?? '']);
+      x.r1 ?? '', x.r2 ?? '', x.r3 ?? '', x.total, x.pending ? 'pending' : ev.finalPublished ? 'final' : 'provisional', x.reviewed ? 'yes' : 'no', rs.find((r) => r.id === x.run)?.number ?? '',
+      ...mins, x.sum.rounds.reduce((s, r) => s + (r.skipped || 0), 0), fb?.rating ?? '', fb?.text ?? '']);
     for (const d of answerDetail(x.a)) {
-      tabs.Answers.push([ev.name, x.school, x.band, x.s.grade, x.s.code, x.s.name, d.round, d.id, d.question, d.answer, d.correct, d.points ?? '', d.max ?? '', d.by, d.note]);
+      tabs.Answers.push([ev.name, x.school, x.band, x.s.grade, x.s.code, x.s.name, d.round, d.id, d.question, d.answer, d.correct, d.points ?? '', d.max ?? '', d.by, d.note,
+        d.timeSec ?? '', d.skipped ? 'yes' : '', d.passed ? 'yes' : '']);
     }
   }
-  for (const s of db.students) tabs.Students.push([s.code, s.name, s.grade, bandOf(s.grade), schoolName(s.schoolId), s.email, iso(s.createdAt), iso(s.lockedAt)]);
-  for (const sc of db.schools) tabs.Schools.push([sc.id, sc.name, db.students.filter((s) => s.schoolId === sc.id).length]);
-  for (const st of db.sets) {
-    const c = st.content;
-    const ids = st.round === 1 ? [...c.items.map((q) => q.id), c.boss.id] : st.round === 2 ? [c.case.id] : [c.target.id];
-    tabs['Question Sets'].push([db.events.find((e) => e.id === st.eventId)?.name || '', st.band, st.round, st.level,
-      st.perf == null ? '' : `${Math.round(st.perf * 100)}%`, ids.join(', '), String(st.bankVersion || ''), st.seed, iso(st.drawnAt)]);
-  }
-  for (const r of listRequests()) tabs['Reattempt Requests'].push([r.student.code, r.student.name, r.student.school, r.note, r.status, r.reply, iso(r.createdAt), iso(r.decidedAt), r.decidedBy]);
-  for (const c of scorecards()) tabs.Scorecards.push([c.code, c.name, c.grade, c.school, c.status, c.total, ...c.rounds.map((v) => v ?? ''), ...Object.keys(getSkillsList()).map((id) => c.skills.find((k) => k.id === id)?.percent ?? ''), c.strength, c.nextStep]);
-  tabs.Admins.push([env.defaultAdmin, 'default', '']);
-  for (const a of db.admins) tabs.Admins.push([a.email, a.addedBy, iso(a.addedAt)]);
   return tabs;
 }
 
 // ---------- Excel reports (the admin's downloads): one for every school, or one school ----------
-// Styled with ExcelJS: a title block on every sheet, dark-orange header rows, light banding, frozen headers,
-// filters, number formats and a short "how to read this" line, so a teacher can open it and understand it at once.
-const XL = { ink: 'FF1D1A17', muted: 'FF5D554E', head: 'FFBF4B11', band: 'FFFFF6EE', line: 'FFE6D5C6', title: 'FFA9440F', good: 'FFE2F2E9', bad: 'FFFDE7E4' };
+const XL = { ink: 'FF1D1A17', muted: 'FF5D554E', head: 'FFBF4B11', band: 'FFFFF6EE', line: 'FFE6D5C6', title: 'FFA9440F' };
 const median = (xs) => { if (!xs.length) return null; const v = [...xs].sort((p, q) => p - q), m = v.length >> 1; return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2; };
 const mean = (xs) => (xs.length ? xs.reduce((t, v) => t + v, 0) / xs.length : null);
 
@@ -899,18 +1132,18 @@ function reportData(schoolId = '') {
   const students = db.students.filter((s) => !schoolId || s.schoolId === schoolId);
   const ids = new Set(students.map((s) => s.id));
   const results = resultRows(ev).filter((x) => ids.has(x.s.id));
-  const done = results.filter((x) => ['finished', 'stopped'].includes(x.a.status) && !x.pending);
+  const done = results.filter((x) => ENDED.includes(x.a.status) && !x.pending);
   // rank within the grade band, across all schools (same tie-breaks as the leaderboard: Round 2, then Round 3 content)
   const ranks = new Map();
   for (const b of BANDS) {
-    const ranked = resultRows(ev).filter((x) => x.band === b.id && ['finished', 'stopped'].includes(x.a.status) && !x.pending)
+    const ranked = resultRows(ev).filter((x) => x.band === b.id && ENDED.includes(x.a.status) && !x.pending)
       .sort((x, y) => y.total - x.total || (y.r2 || 0) - (x.r2 || 0) || y.content - x.content);
     ranked.forEach((x, i) => { const p = ranked[i - 1]; ranks.set(x.a.id, p && p.total === x.total && (p.r2 || 0) === (x.r2 || 0) && p.content === x.content ? ranks.get(p.a.id) : i + 1); });
   }
   const cards = new Map(results.map((x) => [x.a.id, baseCard(x.a)]));
   const statusText = (x) => ({ running: 'Playing', paused: 'Paused', finished: 'Finished', stopped: 'Ended by host' })[x.a.status] || x.a.status;
   const scoring = (x) => (x.pending ? 'Being marked' : ev.finalPublished ? 'Final' : 'Provisional');
-  return { ev, skills, students, results, done, ranks, cards, statusText, scoring, school: schoolId ? schoolName(schoolId) : '' };
+  return { ev, skills, students, ids, results, done, ranks, cards, statusText, scoring, school: schoolId ? schoolName(schoolId) : '' };
 }
 
 export async function exportWorkbook(schoolId = '') {
@@ -923,6 +1156,7 @@ export async function exportWorkbook(schoolId = '') {
   const add = (name, color) => wb.addWorksheet(name, { views: [{ showGridLines: false }], properties: { tabColor: { argb: color } }, pageSetup: { orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0 } });
   const pct = (v, max) => (v == null ? null : v / max);
   const totals = done.map((x) => x.total);
+  const fbs = feedbackList().filter((f) => D.ids.has(f.student.id));
 
   // 1. Overview
   let ws = add('Overview', 'FFE8682A'), row = sheetTitle(ws, `${ev.name} — ${scope}`, `${stamp} Scores are out of 20 per round and 60 in total.`, 6);
@@ -933,9 +1167,12 @@ export async function exportWorkbook(schoolId = '') {
     ['Still playing or being marked', results.length - done.length],
     ['Average total (out of 60)', mean(totals)], ['Median total (out of 60)', median(totals)],
     ['Highest total', totals.length ? Math.max(...totals) : null], ['Lowest total', totals.length ? Math.min(...totals) : null],
+    ['Feedback given', fbs.length], ['Average feedback (1–5)', mean(fbs.map((f) => f.rating))],
   ].map(([k, v]) => [k, typeof v === 'number' && !Number.isInteger(v) ? Math.round(v * 10) / 10 : v]), { heading: 'Summary' });
-  row = xlTable(ws, row, [{ h: 'Round', w: 34 }, { h: 'Average (out of 20)', num: true, fmt: '0.0', w: 16 }, { h: 'Average %', num: true, fmt: '0%', w: 14 }, { h: 'Highest', num: true, w: 12 }, { h: 'Students scored', num: true, w: 16 }],
-    [1, 2, 3].map((r) => { const v = results.map((x) => x[`r${r}`]).filter((n) => n != null); return [`Round ${r} · ${ROUNDS[r].name}`, mean(v), pct(mean(v), 20), v.length ? Math.max(...v) : null, v.length]; }), { heading: 'Rounds' });
+  row = xlTable(ws, row, [{ h: 'Round', w: 34 }, { h: 'Average (out of 20)', num: true, fmt: '0.0', w: 16 }, { h: 'Average %', num: true, fmt: '0%', w: 14 }, { h: 'Highest', num: true, w: 12 },
+    { h: 'Students scored', num: true, w: 16 }, { h: 'Average minutes', num: true, fmt: '0.0', w: 14 }, { h: 'Questions skipped', num: true, w: 14 }],
+  [1, 2, 3].map((r) => { const v = results.map((x) => x[`r${r}`]).filter((n) => n != null), t = results.map((x) => x.sum.rounds[r - 1].takenMs).filter((n) => n != null).map((n) => n / 60000);
+    return [`Round ${r} · ${ROUNDS[r].name}`, mean(v), pct(mean(v), 20), v.length ? Math.max(...v) : null, v.length, mean(t), results.reduce((s, x) => s + (x.sum.rounds[r - 1].skipped || 0), 0)]; }), { heading: 'Rounds' });
   row = xlTable(ws, row, [{ h: 'Grade band', w: 34 }, { h: 'Finished', num: true, w: 16 }, { h: 'Average (out of 60)', num: true, fmt: '0.0', w: 14 }, { h: 'Highest', num: true, w: 12 }],
     BANDS.map((b) => { const v = done.filter((x) => x.band === b.id).map((x) => x.total); return [b.label, v.length, mean(v), v.length ? Math.max(...v) : null]; }), { heading: 'Grade bands' });
   row = xlTable(ws, row, [{ h: 'Total score range', w: 34 }, { h: 'Students', num: true, w: 16 }, { h: 'Share', num: true, fmt: '0%', w: 14 }],
@@ -956,13 +1193,15 @@ export async function exportWorkbook(schoolId = '') {
   }
 
   // 3. Results
-  ws = add('Results', 'FF1B6F45'); row = sheetTitle(ws, `Results — ${scope}`, `${stamp} “Rank in band” compares students in the same grade band across all schools. Sorted by school, band and rank.`, 13);
+  ws = add('Results', 'FF1B6F45'); row = sheetTitle(ws, `Results — ${scope}`, `${stamp} “Rank in band” compares students in the same grade band across all schools. Minutes = time taken in each round.`, 17);
   const order = [...results].sort((x, y) => x.school.localeCompare(y.school) || String(x.band).localeCompare(String(y.band)) || (D.ranks.get(x.a.id) ?? 1e9) - (D.ranks.get(y.a.id) ?? 1e9) || x.s.name.localeCompare(y.s.name));
   const resTop = row + 1;
+  const mins = (x, r) => (x.sum.rounds[r].takenMs == null ? null : Math.round(x.sum.rounds[r].takenMs / 6000) / 10);
   row = xlTable(ws, row, [{ h: 'School', w: 26 }, { h: 'Grade band', w: 12 }, { h: 'Rank in band', num: true, w: 10 }, { h: 'Student code', w: 13 }, { h: 'Name', w: 24 }, { h: 'Grade', num: true, w: 8 },
     { h: 'R1 AI Blitz /20', num: true, w: 11 }, { h: 'R2 AI Case /20', num: true, w: 11 }, { h: 'R3 Creator /20', num: true, w: 11 }, { h: 'Total /60', num: true, w: 10 }, { h: 'Score %', num: true, fmt: '0%', w: 10 },
-    { h: 'Status', w: 14 }, { h: 'Results', w: 13 }],
-  order.map((x) => [x.school, BANDS.find((b) => b.id === x.band)?.label || x.band, D.ranks.get(x.a.id) ?? null, x.s.code, x.s.name, x.s.grade, x.r1, x.r2, x.r3, x.total, x.total / 60, D.statusText(x), D.scoring(x)]),
+    { h: 'Status', w: 14 }, { h: 'Results', w: 13 }, { h: 'R1 min', num: true, w: 8 }, { h: 'R2 min', num: true, w: 8 }, { h: 'R3 min', num: true, w: 8 }, { h: 'Skipped', num: true, w: 9 }],
+  order.map((x) => [x.school, BANDS.find((b) => b.id === x.band)?.label || x.band, D.ranks.get(x.a.id) ?? null, x.s.code, x.s.name, x.s.grade, x.r1, x.r2, x.r3, x.total, x.total / 60, D.statusText(x), D.scoring(x),
+    mins(x, 0), mins(x, 1), mins(x, 2), x.sum.rounds.reduce((s, r) => s + (r.skipped || 0), 0)]),
   { filter: true, freeze: true });
   if (order.length) ws.addConditionalFormatting({ ref: `K${resTop}:K${resTop + order.length - 1}`, rules: [{ type: 'dataBar', cfvo: [{ type: 'num', value: 0 }, { type: 'num', value: 1 }], color: { argb: 'FFF4A26B' }, gradient: false }] });
 
@@ -981,42 +1220,61 @@ export async function exportWorkbook(schoolId = '') {
     [1, 2, 3].flatMap((r) => SCORE_PARTS[r].map((p) => { const v = results.map((x) => x.a.rounds[r]?.score?.parts?.[p.key]?.points).filter((n) => n != null); return [`Round ${r} · ${ROUNDS[r].name}`, p.label, p.max, mean(v), mean(v) == null ? null : mean(v) / p.max]; })),
     { filter: true, freeze: true });
 
-  // 6. Question analysis (Round 1)
-  ws = add('Question Analysis', 'FF5D554E'); row = sheetTitle(ws, `Round 1 question analysis — ${scope}`, `${stamp} One row per question. “% correct” is out of the students who were given that question.`, 9);
+  // 6. Question analysis (Round 1 questions and Round 2 steps)
+  ws = add('Question Analysis', 'FF5D554E'); row = sheetTitle(ws, `Question analysis — ${scope}`, `${stamp} One row per question. “% correct” is out of the students who were given that question. Seconds = average time spent on it.`, 10);
   const items = [];
   for (const set of db.sets.filter((x) => x.eventId === ev.id && x.round === 1)) {
     const recs = results.map((x) => x.a.rounds[1]).filter((r) => r?.setId === set.id && r.submittedAt);
     if (!recs.length) continue;
     for (const q of [...set.content.items, set.content.boss]) {
       const correct = recs.filter((r) => r.draft.answers?.[q.id] === q.key).length;
-      items.push([BANDS.find((b) => b.id === set.band)?.label || set.band, q.id, q === set.content.boss ? 'Final boss' : SKILL_LABELS[q.skill] || q.skill || '', q.difficulty || '', recs.length,
-        recs.filter((r) => r.draft.answers?.[q.id]).length, correct, correct / recs.length, recs.filter((r) => Object.values(r.lifelines.data).some((l) => l.target === q.id)).length]);
+      items.push([BANDS.find((b) => b.id === set.band)?.label || set.band, 1, q.id, q === set.content.boss ? 'Final boss' : SKILL_LABELS[q.skill] || q.skill || '', q.difficulty || '', recs.length,
+        recs.filter((r) => r.draft.answers?.[q.id]).length, correct / recs.length, recs.filter((r) => Object.values(r.lifelines.data).some((l) => l.target === q.id)).length,
+        mean(recs.map((r) => r.meta?.time?.[q.id]).filter((v) => v != null).map((v) => v / 1000))]);
     }
   }
-  xlTable(ws, row, [{ h: 'Grade band', w: 12 }, { h: 'Question ID', w: 14 }, { h: 'Question type', w: 26 }, { h: 'Difficulty', w: 11 }, { h: 'Students', num: true, w: 10 },
-    { h: 'Answered', num: true, w: 10 }, { h: 'Correct', num: true, w: 10 }, { h: '% correct', num: true, fmt: '0%', w: 11 }, { h: 'Lifeline used', num: true, w: 12 }], items, { filter: true, freeze: true });
+  for (const set of db.sets.filter((x) => x.eventId === ev.id && x.round === 2 && x.content.v === 2)) {
+    const recs = results.map((x) => x.a.rounds[2]).filter((r) => r?.setId === set.id && r.submittedAt);
+    if (!recs.length) continue;
+    for (const q of set.content.case.questions) {
+      const pts = recs.map((r) => r.score?.parts?.[q.kind]?.points).filter((v) => v != null);
+      items.push([BANDS.find((b) => b.id === set.band)?.label || set.band, 2, `${set.content.case.id} · step ${q.n}`, `${{ spot: 'Spot the mistake', evidence: 'Choose the evidence', fix: 'Fix it' }[q.kind]}${q.written ? ' (written)' : ''}`,
+        set.content.case.difficulty, recs.length, recs.filter((r) => (q.written ? (r.draft.fix || '').trim() : r.draft.answers?.[q.n])).length, pts.length ? mean(pts) / q.max : null,
+        recs.filter((r) => Object.values(r.lifelines.data).some((l) => Number(l.target) === q.n)).length, mean(recs.map((r) => r.meta?.time?.[`s${q.n}`]).filter((v) => v != null).map((v) => v / 1000))]);
+    }
+  }
+  xlTable(ws, row, [{ h: 'Grade band', w: 12 }, { h: 'Round', num: true, w: 8 }, { h: 'Question ID', w: 20 }, { h: 'Question type', w: 26 }, { h: 'Difficulty', w: 11 }, { h: 'Students', num: true, w: 10 },
+    { h: 'Answered', num: true, w: 10 }, { h: '% correct', num: true, fmt: '0%', w: 11 }, { h: 'Lifeline used', num: true, w: 12 }, { h: 'Avg seconds', num: true, fmt: '0', w: 12 }], items, { filter: true, freeze: true });
 
   // 7. Answers (every answer, for checking)
-  ws = add('Answers', 'FF0F5A8A'); row = sheetTitle(ws, `Every answer — ${scope}`, `${stamp} What each student answered, the reference answer and the points given. Use the filters to look at one student or one question.`, 11);
+  ws = add('Answers', 'FF0F5A8A'); row = sheetTitle(ws, `Every answer — ${scope}`, `${stamp} What each student answered, the reference answer, the points given, the time spent and whether the question was left empty.`, 14);
   xlTable(ws, row, [{ h: 'School', w: 22 }, { h: 'Student code', w: 13 }, { h: 'Name', w: 20 }, { h: 'Round', num: true, w: 8 }, { h: 'Question / part', w: 18 }, { h: 'Question', w: 42, wrap: true },
-    { h: 'Student answer', w: 42, wrap: true }, { h: 'Correct answer / reference', w: 42, wrap: true }, { h: 'Points', num: true, w: 8 }, { h: 'Max', num: true, w: 7 }, { h: 'Marked by', w: 12 }],
-  order.flatMap((x) => answerDetail(x.a).map((d) => [x.school, x.s.code, x.s.name, d.round, d.id, d.question, d.answer, d.correct, d.points, d.max, d.by])), { filter: true, freeze: true });
+    { h: 'Student answer', w: 42, wrap: true }, { h: 'Correct answer / reference', w: 42, wrap: true }, { h: 'Points', num: true, w: 8 }, { h: 'Max', num: true, w: 7 }, { h: 'Marked by', w: 12 },
+    { h: 'Seconds', num: true, w: 9 }, { h: 'Skipped', w: 9 }, { h: 'Passed over', w: 11 }],
+  order.flatMap((x) => answerDetail(x.a).map((d) => [x.school, x.s.code, x.s.name, d.round, d.id, d.question, d.answer, d.correct, d.points, d.max, d.by, d.timeSec, d.skipped ? 'yes' : '', d.passed ? 'yes' : ''])), { filter: true, freeze: true });
 
-  // 8. Students (contact list)
-  ws = add('Students', 'FF1B6F45'); row = sheetTitle(ws, `Students — ${scope}`, `${stamp} Everyone registered, including students who haven’t played yet. Contains contact details — share with care.`, 8);
+  // 8. Students (registrations and contact details)
+  ws = add('Students', 'FF1B6F45'); row = sheetTitle(ws, `Students — ${scope}`, `${stamp} Everyone registered, including students who haven’t played yet. Contains contact details — share with care.`, 9);
   const cur = (s) => currentAttempt(s.id, ev.id);
-  xlTable(ws, row, [{ h: 'School', w: 26 }, { h: 'Student code', w: 13 }, { h: 'Name', w: 24 }, { h: 'Grade', num: true, w: 8 }, { h: 'Grade band', w: 12 }, { h: 'Account email', w: 30 }, { h: 'Phone numbers', w: 26 }, { h: 'Test status', w: 16 }],
-    [...D.students].sort((x, y) => schoolName(x.schoolId).localeCompare(schoolName(y.schoolId)) || x.name.localeCompare(y.name)).map((s) => {
-      const a = cur(s), st = a ? statusOf(a) : 'not joined';
-      return [schoolName(s.schoolId), s.code, s.name, s.grade, BANDS.find((b) => b.id === bandOf(s.grade))?.label || '', s.email, (s.phones || []).join(', '),
-        ({ 'not joined': 'Not joined', away: 'Not in lobby', waiting: 'In lobby', running: 'Playing', paused: 'Paused', finished: 'Finished', stopped: 'Ended by host' })[st] || st];
-    }), { filter: true, freeze: true });
+  xlTable(ws, row, [{ h: 'School', w: 26 }, { h: 'Student code', w: 13 }, { h: 'Name', w: 24 }, { h: 'Grade', num: true, w: 8 }, { h: 'Grade band', w: 12 }, { h: 'Phone', w: 18 }, { h: 'Email', w: 30 },
+    { h: 'Registered', w: 18 }, { h: 'Test status', w: 16 }],
+  [...D.students].sort((x, y) => schoolName(x.schoolId).localeCompare(schoolName(y.schoolId)) || x.name.localeCompare(y.name)).map((s) => {
+    const a = cur(s), st = a ? statusOf(a) : 'not joined';
+    return [schoolName(s.schoolId), s.code, s.name, s.grade, BANDS.find((b) => b.id === bandOf(s.grade))?.label || '', (s.phones || []).join(', '), s.email || '',
+      s.createdAt ? new Date(s.createdAt).toLocaleString('en-GB') : '',
+      ({ 'not joined': 'Not joined', away: 'Not in lobby', waiting: 'In lobby', running: 'Playing', paused: 'Paused', finished: 'Finished', stopped: 'Ended by host' })[st] || st];
+  }), { filter: true, freeze: true });
 
-  // 9. Reattempts
+  // 9. Feedback
+  ws = add('Feedback', 'FFE8682A'); row = sheetTitle(ws, `Feedback — ${scope}`, `${stamp} The smiley each student chose at the end (1 = not fun, 5 = loved it) and their optional comment.`, 7);
+  row = xlTable(ws, row, [{ h: 'Rating', w: 24 }, { h: 'Students', num: true, w: 12 }], RATINGS.map((r) => [`${r.value} · ${r.label}`, fbs.filter((f) => f.rating === r.value).length]), { heading: 'Summary' });
+  xlTable(ws, row, [{ h: 'School', w: 24 }, { h: 'Student code', w: 13 }, { h: 'Name', w: 22 }, { h: 'Grade', num: true, w: 8 }, { h: 'Rating (1–5)', num: true, w: 12 }, { h: 'Comment', w: 60, wrap: true }, { h: 'Given', w: 18 }],
+    fbs.map((f) => [f.student.school, f.student.code, f.student.name, f.student.grade, f.rating, f.text, new Date(f.at).toLocaleString('en-GB')]), { heading: 'Each student', filter: true });
+
+  // 10. Reattempts
   ws = add('Reattempts', 'FF5D554E'); row = sheetTitle(ws, `Reattempt requests — ${scope}`, `${stamp} Requests students sent after their test ended, and the host’s answer.`, 8);
-  const studentIds = new Set(D.students.map((s) => s.id));
   xlTable(ws, row, [{ h: 'School', w: 24 }, { h: 'Student code', w: 13 }, { h: 'Name', w: 22 }, { h: 'Student note', w: 36, wrap: true }, { h: 'Status', w: 11 }, { h: 'Host reply', w: 30, wrap: true }, { h: 'Requested', w: 18 }, { h: 'Decided', w: 18 }],
-    listRequests().filter((r) => studentIds.has(r.student.id)).map((r) => [r.student.school, r.student.code, r.student.name, r.note, { pending: 'Waiting', approved: 'Approved', rejected: 'Declined' }[r.status] || r.status, r.reply,
+    listRequests().filter((r) => D.ids.has(r.student.id)).map((r) => [r.student.school, r.student.code, r.student.name, r.note, { pending: 'Waiting', approved: 'Approved', rejected: 'Declined' }[r.status] || r.status, r.reply,
       r.createdAt ? new Date(r.createdAt).toLocaleString('en-GB') : '', r.decidedAt ? new Date(r.decidedAt).toLocaleString('en-GB') : '']), { filter: true, freeze: true });
 
   return Buffer.from(await wb.xlsx.writeBuffer());
@@ -1030,5 +1288,17 @@ export async function exportSchoolsZip() {
 }
 export const reportFileName = (scope = 'All schools') => `Promptathon report - ${scope.replace(/[^\w ]+/g, '').trim() || 'School'} - ${new Date().toISOString().slice(0, 10)}.xlsx`;
 
+// Registrations as CSV (opens in Excel / Sheets).
+export function studentsCsv() {
+  const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const head = ['Code', 'Name', 'Grade', 'Band', 'School', 'Phone', 'Email', 'Registered', 'Status', 'Total /60', 'Feedback (1–5)', 'Feedback comment'];
+  const rows = studentRows().map((s) => [s.code, s.name, s.grade, s.band, schoolName(s.schoolId), s.phones.join(' '), s.email, s.createdAt ? new Date(s.createdAt).toISOString() : '',
+    s.status, s.scores?.some(Boolean) ? s.scores.reduce((t, x) => t + (x?.total || 0), 0) : '', s.feedback?.rating ?? '', s.feedback?.text ?? '']);
+  return `﻿${[head, ...rows].map((r) => r.map(q).join(',')).join('\r\n')}`;
+}
+
 // The readable tabs kept in the Google Sheet next to the data tabs (see store.js).
-export const reports = () => { const t = reportTabs(); return { Results: t.Results, Answers: t.Answers }; };
+export const reports = () => reportTabs();
+
+// The scored parts a submitted round has (depends on its question), for the admin's score editor.
+export const partsOfRound = (r, rec) => partsFor(r, setById(rec?.setId)?.content);

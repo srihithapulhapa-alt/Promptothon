@@ -6,28 +6,28 @@ const PAGES = { privacy: 'Privacy Policy', terms: 'Terms of Service', cookies: '
 
 const body = (kind, mail) => ({
   privacy: `
-    <p class="muted">Last updated: October 2026. Promptathon is run by <b>The AI Club</b> (“we”, “us”). We know our players are children, so we collect as little as we can and use it only to run the event.</p>
+    <p class="muted">Last updated: November 2026. Promptathon is run by <b>The AI Club</b> (“we”, “us”). We know our players are children, so we collect as little as we can and use it only to run the event.</p>
     <h2>What we collect</h2>
     <ul>
-      <li><b>From the parent or guardian’s sign-in (Google):</b> name, email address and profile picture. We never see your password.</li>
-      <li><b>About each child:</b> name, grade, school, an optional phone number, and the student code we create.</li>
-      <li><b>During the event:</b> answers, scores, which lifelines were used, time taken, and a note if the child left the test window.</li>
-      <li><b>Consent records:</b> when a parent or guardian agreed, and to which version of this policy.</li>
+      <li><b>About each child, typed when joining:</b> name, grade, school, a parent’s, guardian’s or teacher’s phone number, an optional email address, and the player code we create. Players do not sign in or create an account.</li>
+      <li><b>During the event:</b> answers (including the practice questions), scores, which lifelines were used, time spent on each question, questions left empty, a note if the child left the test window, and the optional smiley rating and comment at the end.</li>
+      <li><b>Consent records:</b> when a parent, guardian or teacher agreed, and to which version of this policy.</li>
+      <li><b>Hosts</b> (teachers and organisers) sign in with Google; we keep their name and email address.</li>
     </ul>
     <h2>Why we use it</h2>
     <ul>
       <li>To let your child take part, mark the rounds and show results and leaderboards.</li>
       <li>To keep the event fair (for example, noticing when the test window is left).</li>
-      <li>To email a score card, if the event offers one, to the account email.</li>
+      <li>To email a score card, if the event offers one, to the email given when joining, and to contact the school or family about the event using the phone number.</li>
     </ul>
     <p>We do <b>not</b> sell children’s data, show ads, build behavioural profiles, or track children across other websites.</p>
     <h2>Children and consent</h2>
-    <p>Under India’s Digital Personal Data Protection Act, 2023, a child is anyone under 18 and a parent or guardian must give consent. That is why a parent or guardian ticks a consent box each time a student is added. You can withdraw consent at any time by using <a href="#/legal/delete">Delete my data</a>.</p>
+    <p>Under India’s Digital Personal Data Protection Act, 2023, a child is anyone under 18 and a parent or guardian must give consent. That is why a consent box (confirming a parent, guardian or teacher agreed) is ticked each time a student joins. You can withdraw consent at any time by using <a href="#/legal/delete">Delete my data</a>.</p>
     <h2>Who sees it</h2>
     <ul>
       <li>The event hosts and their schools’ organisers, to run the event.</li>
       <li>Other players see only a leaderboard (a name, school and score; the host decides how wide the leaderboard is).</li>
-      <li>Service providers that store or process data for us: Google (Sheets and Drive store our records), Anthropic (an AI model may help mark written answers; answers are sent without account email), and an email service for score cards.</li>
+      <li>Service providers that store or process data for us: Google (Sheets and Drive store our records), Anthropic (an AI model may help mark written answers; answers are sent without names, phone numbers or emails), and an email service for score cards.</li>
     </ul>
     <p>Your data may be stored on servers outside India. We only use providers that protect it appropriately.</p>
     <h2>How long we keep it</h2>
@@ -39,12 +39,14 @@ const body = (kind, mail) => ({
     <h2>Grievances and contact</h2>
     <p>Questions or complaints? Write to <a href="mailto:${mail}">${mail}</a>. We aim to reply within 7 days. If you are not satisfied you may complain to the Data Protection Board of India.</p>`,
   terms: `
-    <p class="muted">Last updated: October 2026. By signing in or adding a student you accept these terms. If you are under 18, a parent or guardian must accept them for you.</p>
+    <p class="muted">Last updated: November 2026. By joining Promptathon you accept these terms. If you are under 18, a parent or guardian must accept them for you.</p>
     <h2>The event</h2>
     <p>Promptathon is a timed, three-round challenge about thinking carefully with AI. Details such as dates, rounds and scoring are shown inside the app and may be changed by the hosts.</p>
-    <h2>Accounts</h2>
-    <ul><li>Sign in with your own Google account. One account can hold several students (for example, brothers and sisters).</li>
-      <li>Give correct details: the name, grade and school must be the child’s own.</li></ul>
+    <h2>Joining</h2>
+    <ul><li>Each player joins in their own browser window with their own name, grade and school. A phone number of a parent, guardian or teacher is required; an email is optional.</li>
+      <li>Give correct details: the name, grade and school must be the child’s own. Never play as someone else.</li>
+      <li>Once you join, your browser window belongs to you and can’t be switched to another player. You can fix your own details in the lobby until the test starts. Only a host can log you out.</li>
+      <li>Joining always makes a new player with a new player code. If a host logs you out, come back with <b>I have a player code</b> — your code is shown when you join and at the top of every page.</li></ul>
     <h2>Play fair</h2>
     <ul>
       <li>Use your own ideas. Do not copy, share or get answers from others.</li>
@@ -63,20 +65,21 @@ const body = (kind, mail) => ({
     <p>We may update these terms; the date above will change. These terms are governed by the laws of India, and the courts at the event organiser’s registered location have jurisdiction.</p>
     <p>Questions: <a href="mailto:${mail}">${mail}</a></p>`,
   cookies: `
-    <p class="muted">Last updated: October 2026.</p>
+    <p class="muted">Last updated: November 2026.</p>
     <h2>What are cookies?</h2>
     <p>Cookies are small files that a website saves in your browser.</p>
     <h2>What we use</h2>
     <div class="table-wrap"><table class="t"><thead><tr><th>Name</th><th>What it does</th><th>How long</th><th>Type</th></tr></thead><tbody>
-      <tr><td><code>pt</code></td><td>Keeps you signed in and remembers which student is playing.</td><td>7 days</td><td>Essential</td></tr>
-      <tr><td><code>pt_state</code></td><td>A short check that protects the sign-in from being hijacked.</td><td>10 minutes</td><td>Essential</td></tr>
-      <tr><td>Browser storage</td><td>Remembers your reading settings (text size, font, theme), your answers on this device as a backup, and that you saw the cookie notice.</td><td>Until you clear it</td><td>Essential / preference</td></tr>
+      <tr><td><code>pt</code></td><td>Hosts only: keeps a host signed in to the dashboard. Players get no cookies.</td><td>7 days</td><td>Essential</td></tr>
+      <tr><td><code>pt_state</code></td><td>Hosts only: a short check that protects the sign-in from being hijacked.</td><td>10 minutes</td><td>Essential</td></tr>
+      <tr><td>Window storage</td><td>Remembers which player is using this browser window, and their reading settings. It is forgotten when the window is closed.</td><td>Until the window closes</td><td>Essential / preference</td></tr>
+      <tr><td>Browser storage</td><td>A backup of the answers on this computer while a round is open, and that you saw the cookie notice.</td><td>Until you clear it</td><td>Essential</td></tr>
     </tbody></table></div>
     <h2>What we do not use</h2>
     <p>No advertising cookies, no analytics or tracking cookies, and nothing that follows children across other sites. Because every cookie we use is essential for the site to work, there is nothing to switch on or off. If that changes, we will ask first.</p>
-    <p>Signing in with Google happens on Google’s page, and Google may set its own cookies under its own policy.</p>
+    <p>Hosts sign in with Google on Google’s page, and Google may set its own cookies under its own policy.</p>
     <h2>Control</h2>
-    <p>You can delete cookies in your browser settings; you would then have to sign in again.</p>`,
+    <p>You can delete cookies and storage in your browser settings. A player who closes the window can come back after a host logs them out, by typing their player code on the start page.</p>`,
 })[kind];
 
 export function renderLegal(main, kind, { cfg, api, toast, esc }) {

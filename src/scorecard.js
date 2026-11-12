@@ -5,29 +5,34 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { db } from './store.js';
-import { SCORE_PARTS, EVENT_NAME, SCORECARD_TEMPLATE, SKILL_CARD, SKILL_PERCENT_FLOOR, bandOf } from './config.js';
+import { SCORE_PARTS, EVENT_NAME, SCORECARD_TEMPLATE, SKILL_CARD, SKILL_PERCENT_FLOOR, SKILL_MAP, bandOf } from './config.js';
 import { getSkills } from './bank.js';
+import { partsFor } from './scoring.js';
 
 const ASSETS = new URL('../templates/scorecard-assets/', import.meta.url);
-const R2_PARTS = { rebuild: ['rebuild'], spot: ['spotId', 'spotWhy'], match: ['matchId', 'matchWhy'], repair: ['repairFix', 'repairWhy'] };
-const maxOf = (round, key) => SCORE_PARTS[round].find((p) => p.key === key).max;
+const R2_LEGACY = { rebuild: ['rebuild'], spot: ['spotId', 'spotWhy'], match: ['matchId', 'matchWhy'], repair: ['repairFix', 'repairWhy'] };
 const sum = (rec) => Object.values(rec.score.parts).reduce((t, p) => t + (p.points || 0), 0);
 
 // Every scored component of a student's submitted rounds, with the skills it feeds.
 function components(a) {
   const out = [];
-  const add = (task, part, round, earned, skills) => { if (skills?.length) out.push({ task, part, round, earned, max: maxOf(round, part), skills }); };
   for (const r of [1, 2, 3]) {
     const rec = a.rounds?.[r];
     if (!rec?.submittedAt || !rec.score) continue; // a round the student never reached has no assigned questions
     const c = db.sets.find((s) => s.id === rec.setId)?.content, parts = rec.score.parts || {};
-    if (r === 1 && c?.items?.[0]?.skillId) {
+    if (!c) continue;
+    const defs = partsFor(r, c), maxOf = (key) => defs.find((p) => p.key === key)?.max ?? SCORE_PARTS[r]?.find((p) => p.key === key)?.max ?? 0;
+    const add = (task, part, earned, skills) => { const max = maxOf(part); if (skills?.length && max) out.push({ task, part, round: r, earned, max, skills }); };
+    if (r === 1 && c.items?.[0]?.skillId) {
       for (const q of c.items) out.push({ task: q.id, part: 'quick', round: 1, earned: parts.quick?.items?.[q.id] ?? 0, max: q.max ?? 2, skills: [{ id: q.skillId, max: q.max ?? 2 }] });
-      for (const part of ['bossChoice', 'bossWhy']) add(c.boss.id, part, 1, parts[part]?.points, c.boss.skills?.[part]);
-    } else if (r === 2 && c?.case) {
-      for (const [type, keys] of Object.entries(R2_PARTS)) for (const part of keys) add(`${c.case.id}:${type}`, part, 2, parts[part]?.points, c.case.puzzles[type]?.skills?.[part]);
-    } else if (r === 3 && c?.target) {
-      for (const p of SCORE_PARTS[3]) add(c.target.id, p.key, 3, parts[p.key]?.points, c.target.skills?.[p.key]);
+      for (const part of ['bossChoice', 'bossWhy']) add(c.boss.id, part, parts[part]?.points, c.boss.skills?.[part]);
+    } else if (r === 2 && c.v === 2) {
+      const written = c.case.questions[2]?.written;
+      for (const p of defs) add(`${c.case.id}:${p.key}`, p.key, parts[p.key]?.points, SKILL_MAP[2][p.key === 'fix' && written ? 'fixWritten' : p.key]);
+    } else if (r === 2 && c.case?.puzzles) {
+      for (const [type, keys] of Object.entries(R2_LEGACY)) for (const part of keys) add(`${c.case.id}:${type}`, part, parts[part]?.points, c.case.puzzles[type]?.skills?.[part]);
+    } else if (r === 3 && c.target) {
+      for (const p of defs) add(c.target.id, p.key, parts[p.key]?.points, c.v === 2 ? SKILL_MAP[3][p.key] : c.target.skills?.[p.key]);
     }
   }
   return out;

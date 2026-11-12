@@ -11,7 +11,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400&family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=Lexend:wght@400;600&display=swap">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/opendyslexic@5/index.css">
-  <link rel="stylesheet" href="/styles.css?v=2">
+  <link rel="stylesheet" href="/styles.css?v=3">
 </head>
 <body>
   <a class="skip" href="#main">Skip to content</a>
@@ -23,7 +23,7 @@
     </a>
     <nav class="top-nav" id="nav" aria-label="Main"></nav>
     <div class="top-tools">
-      <button class="btn ghost sm" data-act="rules" aria-haspopup="dialog">How to play</button>
+      <button class="btn ghost sm" data-act="rules" aria-haspopup="dialog" aria-label="How to play"><span class="hide-sm">How to play</span><span class="show-sm" aria-hidden="true">?</span></button>
       <button class="btn ghost sm" data-act="settings" aria-haspopup="dialog" aria-label="Reading and display settings"><span aria-hidden="true">Aa</span><span class="hide-sm"> Reading</span></button>
       <div id="account"></div>
     </div>
@@ -34,7 +34,7 @@
   <footer class="foot">
     <img src="/the-ai-club-logo.png" alt="The AI Club" width="40" height="22">
     <span>Promptathon is a product of The AI Club · The AI Challenge Arena</span>
-    <nav class="foot-links" aria-label="Legal"><a href="#/legal/privacy">Privacy</a><a href="#/legal/terms">Terms</a><a href="#/legal/cookies">Cookies</a>
+    <nav class="foot-links" aria-label="Legal"><a href="#/legal/privacy">Privacy</a><a href="#/legal/terms">Terms</a><a href="#/legal/cookies">Cookies</a><a href="#/admin">Host sign-in</a></nav>
   </footer>
 
   <div id="ruler" class="ruler" hidden></div>
@@ -52,6 +52,6 @@
     </form>
   </dialog>
 
-  <script type="module" src="/app.js?v=2"></script>
+  <script type="module" src="/app.js?v=3"></script>
 </body>
 </html>

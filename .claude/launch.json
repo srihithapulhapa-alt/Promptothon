@@ -4,10 +4,14 @@
     {
       "name": "promptathon",
       "runtimeExecutable": "npm",
-      "runtimeArgs": [
-        "start"
-      ],
+      "runtimeArgs": ["start"],
       "port": 3000
+    },
+    {
+      "name": "promptathon-test",
+      "runtimeExecutable": "env",
+      "runtimeArgs": ["DATA_STORE=memory", "QUESTION_BANK_FILE=.cache/test/bank.xlsx", "PORT=3997", "SESSION_SECRET=local-test", "TEST_ADMIN_KEY=local-test-key", "node", "src/server.js"],
+      "port": 3997
     }
   ]
 }

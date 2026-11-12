@@ -10,7 +10,7 @@ import path from 'node:path';
 import { env, saveEnv, bandOf, SKILLS, DATA_SHEET_TITLE, STORE_FLUSH_MS, STORE_URGENT_MS, STORE_MIN_GAP_MS, REPORT_SYNC_MS, SHEET_GRID_ROWS } from './config.js';
 import * as G from './google.js';
 
-export const db = { settings: {}, admins: [], schools: [], events: [], students: [], attempts: [], requests: [], sets: [], consents: [], deletions: [] };
+export const db = { settings: {}, admins: [], schools: [], events: [], students: [], attempts: [], requests: [], sets: [], consents: [], deletions: [], feedback: [] };
 export const uid = (prefix = '') => prefix + crypto.randomBytes(6).toString('base64url');
 
 // ---------- cell helpers ----------
@@ -43,43 +43,47 @@ const TABLES = [
     fromRow: (c) => { const email = str(c[0]).toLowerCase(); return email && email !== env.defaultAdmin ? { email, addedBy: str(c[1]), addedAt: ms(c[2]) } : null; },
     add: (r) => db.admins.push(r) },
 
-  { name: 'Students', head: ['Student ID', 'Code', 'Name', 'Grade', 'Band', 'School', 'School ID', 'Account email', 'Created', 'Locked in', 'Phone numbers'],
+  { name: 'Students', head: ['Student ID', 'Code', 'Name', 'Grade', 'Band', 'School', 'School ID', 'Account email', 'Created', 'Locked in', 'Phone numbers', 'Login epoch', 'Logged in'],
     list: () => db.students, key: (r) => r.id,
-    toRow: (r, x) => [r.id, r.code, r.name, r.grade, bandOf(r.grade) || '', x.school.get(r.schoolId)?.name || '', r.schoolId, r.email, iso(r.createdAt), iso(r.lockedAt), (r.phones || []).join(', ')],
+    toRow: (r, x) => [r.id, r.code, r.name, r.grade, bandOf(r.grade) || '', x.school.get(r.schoolId)?.name || '', r.schoolId, r.email, iso(r.createdAt), iso(r.lockedAt), (r.phones || []).join(', '), r.epoch || 0, r.loggedIn ? 'yes' : ''],
     reset: () => { db.students = []; },
     fromRow: (c) => (str(c[0]) ? { id: str(c[0]), code: str(c[1]), name: str(c[2]), grade: num(c[3]), schoolId: str(c[6]), email: str(c[7]).toLowerCase(),
-      createdAt: ms(c[8]), lockedAt: ms(c[9]), phones: str(c[10]).split(/,\s*/).filter(Boolean) } : null),
+      createdAt: ms(c[8]), lockedAt: ms(c[9]), phones: str(c[10]).split(/,\s*/).filter(Boolean), epoch: num(c[11]), loggedIn: str(c[12]) === 'yes' } : null),
     add: (r) => db.students.push(r) },
 
   { name: 'Attempts', head: ['Attempt ID', 'Student ID', 'Code', 'Name', 'Status', 'Created', 'Started', 'Paused at', 'Paused ms', 'Ended', 'Device',
-    'Archived', 'Archived at', 'R1', 'R2', 'R3', 'Total', 'Acks (JSON)', 'Schedule (JSON)', 'Event ID', 'Run ID', 'Score card (JSON)', 'Round reattempt (JSON)'],
+    'Archived', 'Archived at', 'R1', 'R2', 'R3', 'Total', 'Acks (JSON)', 'Schedule (JSON)', 'Event ID', 'Run ID', 'Score card (JSON)', 'Round reattempt (JSON)',
+    'Practice (JSON)', 'Paused by closing'],
     list: () => db.attempts, key: (a) => a.id,
     toRow: (a, x) => {
       const s = x.student.get(a.studentId), t = [1, 2, 3].map((r) => total(a.rounds?.[r]));
       return [a.id, a.studentId, s?.code || '', s?.name || '', a.status, iso(a.createdAt), iso(a.startedAt), iso(a.pausedAt), a.pausedMs || 0, iso(a.endedAt),
-        a.deviceId || '', a.archived ? 'yes' : '', iso(a.archivedAt), ...t, t.reduce((n, v) => n + (v || 0), 0), JSON.stringify(a.acks || {}), a.flow ? JSON.stringify(a.flow) : '', a.eventId || '', a.runId || '', a.card ? JSON.stringify(a.card) : '', a.redo ? JSON.stringify(a.redo) : ''];
+        a.deviceId || '', a.archived ? 'yes' : '', iso(a.archivedAt), ...t, t.reduce((n, v) => n + (v || 0), 0), JSON.stringify(a.acks || {}), a.flow ? JSON.stringify(a.flow) : '', a.eventId || '', a.runId || '', a.card ? JSON.stringify(a.card) : '', a.redo ? JSON.stringify(a.redo) : '',
+        a.practice ? JSON.stringify(a.practice) : '', a.closedPause ? 'yes' : ''];
     },
     reset: () => { db.attempts = []; },
     fromRow: (c) => (str(c[0]) ? { id: str(c[0]), studentId: str(c[1]), status: str(c[4]) || 'waiting', createdAt: ms(c[5]), startedAt: ms(c[6]), pausedAt: ms(c[7]),
       pausedMs: num(c[8]), endedAt: ms(c[9]), deviceId: str(c[10]) || null, lastSeen: null, archived: str(c[11]) === 'yes' || undefined, archivedAt: ms(c[12]),
-      acks: parse(c[17], {}), flow: parse(c[18], undefined), eventId: str(c[19]), runId: str(c[20]) || undefined, card: parse(c[21], undefined), redo: parse(c[22], undefined), rounds: {} } : null),
+      acks: parse(c[17], {}), flow: parse(c[18], undefined), eventId: str(c[19]), runId: str(c[20]) || undefined, card: parse(c[21], undefined), redo: parse(c[22], undefined),
+      practice: parse(c[23], undefined), closedPause: str(c[24]) === 'yes' || undefined, rounds: {} } : null),
     add: (a) => db.attempts.push(a) },
 
   { name: 'Rounds', head: ['Attempt ID', 'Round', 'Code', 'Name', 'Set ID', 'Opened', 'Saved', 'Submitted', 'Submit reason', 'Reviewed', 'Score', 'Marking pending',
-    'Data 1 (JSON)', 'Data 2 (JSON)', 'Data 3 (JSON)'],
+    'Data 1 (JSON)', 'Data 2 (JSON)', 'Data 3 (JSON)', 'Time taken (s)', 'Skipped'],
     list: () => db.attempts.flatMap((a) => Object.entries(a.rounds || {}).map(([r, rec]) => ({ attemptId: a.id, studentId: a.studentId, round: Number(r), rec }))),
     key: (x) => `${x.attemptId}:${x.round}`,
     toRow: ({ attemptId, studentId, round, rec }, x) => {
       const s = x.student.get(studentId);
       return [attemptId, round, s?.code || '', s?.name || '', rec.setId, iso(rec.openedAt), iso(rec.savedAt), iso(rec.submittedAt), rec.submitReason || '', iso(rec.reviewedAt),
-        total(rec), rec.score?.pending ? 'yes' : '', ...jsonCells({ draft: rec.draft, lifelines: rec.lifelines, generations: rec.generations, score: rec.score })];
+        total(rec), rec.score?.pending ? 'yes' : '', ...jsonCells({ draft: rec.draft, lifelines: rec.lifelines, generations: rec.generations, score: rec.score, meta: rec.meta }),
+        rec.meta?.takenMs != null ? Math.round(rec.meta.takenMs / 1000) : '', (rec.meta?.skipped || []).join(', ')];
     },
     reset: () => {},
     fromRow: (c) => {
       if (!str(c[0])) return null;
       const d = fromCells(c.slice(12, 15), {}) || {};
       return { attemptId: str(c[0]), round: num(c[1]), rec: { setId: str(c[4]), openedAt: ms(c[5]), savedAt: ms(c[6]), submittedAt: ms(c[7]), submitReason: str(c[8]) || undefined,
-        reviewedAt: ms(c[9]) || undefined, draft: d.draft || {}, lifelines: d.lifelines || { used: [], data: {} }, generations: d.generations || [], score: d.score || null } };
+        reviewedAt: ms(c[9]) || undefined, draft: d.draft || {}, lifelines: d.lifelines || { used: [], data: {} }, generations: d.generations || [], score: d.score || null, meta: d.meta || undefined } };
     },
     add: (x) => { const a = db.attempts.find((y) => y.id === x.attemptId); if (!a) return false; a.rounds[x.round] = x.rec; return true; } },
 
@@ -116,6 +120,15 @@ const TABLES = [
     fromRow: (c) => (str(c[0]) ? { id: str(c[0]), name: str(c[1]), email: str(c[2]), code: str(c[3]), details: str(c[4]), at: ms(c[5]), status: str(c[6]) || 'open', by: str(c[7]), doneAt: ms(c[8]) } : null),
     add: (r) => db.deletions.push(r) },
 
+  // The smiley rating (1–5) and optional comment each student leaves at the end.
+  { name: 'Feedback', head: ['Feedback ID', 'Student ID', 'Attempt ID', 'Code', 'Name', 'School', 'Grade', 'Rating (1–5)', 'Comment', 'Given at'],
+    list: () => db.feedback, key: (r) => r.id,
+    toRow: (r, x) => { const s = x.student.get(r.studentId); return [r.id, r.studentId, r.attemptId, s?.code || '', s?.name || '', x.school.get(s?.schoolId)?.name || '', s?.grade ?? '',
+      r.rating, r.text || '', iso(r.at)]; },
+    reset: () => { db.feedback = []; },
+    fromRow: (c) => (str(c[0]) ? { id: str(c[0]), studentId: str(c[1]), attemptId: str(c[2]), rating: num(c[7]), text: str(c[8]), at: ms(c[9]) } : null),
+    add: (r) => db.feedback.push(r) },
+
   // Derived from the saved answers (see scorecard.js) and kept in the sheet so cards can be produced later from stored data.
   { name: 'Scorecards', derived: true,
     head: ['Attempt ID', 'Student ID', 'Code', 'Name', 'Grade', 'School', 'Band', 'Status', 'Total /60', 'Round 1', 'Round 2', 'Round 3',
@@ -143,6 +156,11 @@ const sleep = (ms_) => new Promise((r) => setTimeout(r, ms_));
 
 // ---------- start-up: find the sheet, load everything ----------
 export async function initStore() {
+  if (env.memoryStore) { // tests only: nothing is saved anywhere
+    ready = true;
+    console.warn('DATA_STORE=memory — data is kept in memory only and is lost when the server stops. Never use this for a real event.');
+    return;
+  }
   await bootstrapConnection();
   const id = env.dataSheetId;
   const info = await G.sheetInfo(id);
@@ -253,7 +271,10 @@ function finishMigration() {
 // ---------- saving ----------
 let ready = false, dirty = false, timer = null, dueAt = 0, flushing = null, lastFlush = 0, failures = 0;
 
+export const storeHealth = () => ({ memory: env.memoryStore, lastFlush, failures, pending: dirty });
+
 export function save(urgent = false) {
+  if (env.memoryStore) return;
   dirty = true;
   if (ready) schedule(urgent ? STORE_URGENT_MS : STORE_FLUSH_MS);
 }
@@ -278,6 +299,7 @@ function flushOnce() {
 
 // Resolves once every change made so far has reached the sheet.
 export async function flush() {
+  if (env.memoryStore) return;
   if (flushing) await flushing.catch(() => {});
   clearTimeout(timer); timer = null;
   await flushOnce();
@@ -325,7 +347,7 @@ let reportProvider = null, reportHash = '';
 export function setReports(fn) { reportProvider = fn; }
 
 export async function syncReports() {
-  if (!reportProvider || !ready) return;
+  if (!reportProvider || !ready || env.memoryStore) return;
   const tabs = reportProvider();
   const hash = crypto.createHash('sha1').update(JSON.stringify(tabs)).digest('hex');
   if (hash === reportHash) return;

@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400&family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&display=swap">
-  <link rel="stylesheet" href="/styles.css?v=2">
+  <link rel="stylesheet" href="/styles.css?v=3">
 </head>
 <body>
   <header class="top">
@@ -17,7 +17,7 @@
       <img src="/the-ai-club-logo.png" alt="The AI Club" width="84" height="46">
       <span class="brand-text"><b>Promptathon</b></span>
     </a>
-    <div class="top-tools"><a class="btn ghost sm" href="/#/play">Skip to lobby →</a></div>
+    <div class="top-tools"><a class="btn ghost sm" href="/#/lobby">Skip to lobby →</a></div>
   </header>
   <main id="main" tabindex="-1">
     <div class="wrap book">
@@ -29,7 +29,7 @@
         <span class="chip" id="count">1 of 8</span>
         <button class="btn ghost" id="next">Next →</button>
         <button class="btn quiet" id="full">⛶ Fullscreen</button>
-        <a class="btn" href="/#/play">Go to lobby →</a>
+        <a class="btn" href="/#/lobby">Go to lobby →</a>
       </div>
     </div>
   </main>
@@ -47,7 +47,7 @@
       page.replaceChildren(img);
       if (at === total) { // the last page has an "Enter the Lobby" button drawn on it: make it a real link
         const go = document.createElement('a');
-        go.href = '/#/play'; go.className = 'to-lobby'; go.setAttribute('aria-label', 'Enter the Lobby');
+        go.href = '/#/lobby'; go.className = 'to-lobby'; go.setAttribute('aria-label', 'Enter the Lobby');
         go.onclick = () => document.fullscreenElement && document.exitFullscreen().catch(() => {});
         page.append(go);
       }

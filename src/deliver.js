@@ -1,5 +1,5 @@
 // Getting score cards out: PDF files (headless Chromium renders the same HTML template), a ZIP of PDFs, and email.
-// Email uses SMTP (Gmail / Google Workspace app password from .env) and goes to the address saved from each student's Google sign-in.
+// Email uses SMTP (Gmail / Google Workspace app password from .env) and goes to the email typed when the student registered (optional).
 import fs from 'node:fs';
 import nodemailer from 'nodemailer';
 import { zipSync, strToU8 } from 'fflate';
@@ -30,10 +30,14 @@ export async function cardPdf(card) {
 
 export const cardFileName = (card, ext = 'pdf') => `AI-Readiness-Scorecard-${card.name.replace(/[^\w]+/g, '-').replace(/^-|-$/g, '')}-${card.code}.${ext}`;
 
-// A ZIP with one PDF per card.
+// A ZIP with one PDF per card (three rendered at a time: a class of 100 takes about a minute, not five).
 export async function cardsZip(cards) {
   const files = {};
-  for (const c of cards) files[cardFileName(c)] = new Uint8Array(await cardPdf(c));
+  for (let i = 0; i < cards.length; i += 3) {
+    const batch = cards.slice(i, i + 3);
+    const pdfs = await Promise.all(batch.map((c) => cardPdf(c)));
+    batch.forEach((c, k) => { files[cardFileName(c)] = new Uint8Array(pdfs[k]); });
+  }
   return Buffer.from(zipSync(files, { level: 0 }));
 }
 
@@ -58,13 +62,15 @@ export async function sendCardEmail(card, to, pdf) {
     ...message(card), attachments: [{ filename: cardFileName(card), content: pdf, contentType: 'application/pdf' }] });
 }
 
-// Emails approved cards to the address each student signed in with. Cards already emailed (and unchanged) are skipped unless `resend`.
+// Emails approved cards to the address each student registered with. Cards already emailed (and unchanged) are skipped unless `resend`;
+// students who gave no email are counted separately so the host can download those cards instead.
 export async function sendCards(attemptIds, { resend = false, by = '' } = {}) {
   if (!emailReady()) throw new Error('Email is not set up. Add SMTP_USER and SMTP_PASS to .env.');
-  const out = { sent: 0, skipped: 0, failed: [] };
+  const out = { sent: 0, skipped: 0, noEmail: 0, failed: [] };
   for (const id of attemptIds) {
     const a = db.attempts.find((x) => x.id === id), card = a && scorecard(a);
-    if (!card?.approved || !card.email || (card.emailedAt && !card.changedSinceEmailed && !resend)) { out.skipped++; continue; }
+    if (card?.approved && !card.email) { out.noEmail++; continue; }
+    if (!card?.approved || (card.emailedAt && !card.changedSinceEmailed && !resend)) { out.skipped++; continue; }
     try {
       await sendCardEmail(card, card.email, await cardPdf(card));
       Object.assign(a.card, { sentAt: Date.now(), sentTo: card.email, sentBy: by, sentVersion: card.version, lastError: undefined });

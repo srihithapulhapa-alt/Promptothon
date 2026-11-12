@@ -3,9 +3,11 @@
 import { env, SCOPES_LOGIN, SCOPES_DRIVE } from './config.js';
 
 const OAUTH = 'https://accounts.google.com/o/oauth2/v2/auth';
-const TOKEN = 'https://oauth2.googleapis.com/token';
-const DRIVE = 'https://www.googleapis.com/drive/v3/files';
-const SHEETS = 'https://sheets.googleapis.com/v4/spreadsheets';
+// GOOGLE_API_BASE points the backend at a stand-in server (load tests only); real runs use Google.
+const BASE = env.googleApiBase;
+const TOKEN = BASE ? `${BASE}/token` : 'https://oauth2.googleapis.com/token';
+const DRIVE = BASE ? `${BASE}/drive/v3/files` : 'https://www.googleapis.com/drive/v3/files';
+const SHEETS = BASE ? `${BASE}/v4/spreadsheets` : 'https://sheets.googleapis.com/v4/spreadsheets';
 const redirectUri = () => `${env.baseUrl}/auth/callback`;
 const JSON_HEADERS = { 'content-type': 'application/json' };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -39,9 +41,14 @@ export async function exchangeCode(code) {
 let cached = { token: '', exp: 0 };
 export const driveConnected = () => Boolean(env.googleRefreshToken);
 
+let refreshing = null; // one token refresh at a time, however many writes are waiting
 async function accessToken() {
   if (!driveConnected()) throw new Error('Google Drive is not connected. Run `npm run connect-google` on the server.');
   if (cached.token && Date.now() < cached.exp - 60000) return cached.token;
+  refreshing ||= refreshToken().finally(() => { refreshing = null; });
+  return refreshing;
+}
+async function refreshToken() {
   const res = await fetch(TOKEN, {
     method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({ client_id: env.googleClientId, client_secret: env.googleClientSecret,
@@ -57,9 +64,16 @@ async function accessToken() {
 async function gfetch(url, opts = {}) {
   for (let attempt = 0; ; attempt++) {
     const token = await accessToken();
-    const res = await fetch(url, { ...opts, headers: { ...(opts.headers || {}), authorization: `Bearer ${token}` } });
+    let res;
+    try {
+      res = await fetch(url, { ...opts, signal: AbortSignal.timeout(60000), headers: { ...(opts.headers || {}), authorization: `Bearer ${token}` } });
+    } catch (err) { // network hiccup or timeout: retry like a 5xx
+      if (attempt < 4) { await sleep(1000 * 2 ** attempt); continue; }
+      throw new Error(`Google API unreachable: ${err.message}`);
+    }
     if (res.ok) return res;
-    if ((res.status === 429 || res.status >= 500) && attempt < 4) { await sleep(1000 * 2 ** attempt); continue; }
+    if (res.status === 401 && attempt < 1) { cached = { token: '', exp: 0 }; continue; }
+    if ((res.status === 429 || res.status >= 500) && attempt < 5) { await sleep(Math.min(20000, 1000 * 2 ** attempt) + Math.random() * 500); continue; }
     throw new Error(`Google API ${res.status}: ${(await res.text()).slice(0, 300)}`);
   }
 }
